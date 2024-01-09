@@ -1,0 +1,74 @@
+# Compiled files
+*.py[cod]
+*.a
+*.o
+*.so
+__pycache__
+
+# Ignore .c files by default to avoid including generated code. If you want to
+# add a non-generated .c extension, use `git add -f filename.c`.
+*.c
+
+# Other generated files
+*/version.py
+*/cython_version.py
+htmlcov
+.coverage
+MANIFEST
+.ipynb_checkpoints
+.eggs
+pip-wheel-metadata
+.hypothesis
+doctests.py
+coverage.xml
+
+# Sphinx
+_build
+docs/api
+docs/_build
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Eclipse editor project files
+.project
+.pydevproject
+.settings
+
+# VScode editor project files
+.vscode/*
+
+# Pycharm editor project files
+.idea
+
+# Packages/installer info
+*.egg
+*.egg-info
+dist
+build
+eggs
+parts
+bin
+var
+sdist
+develop-eggs
+.installed.cfg
+distribute-*.tar.gz
+
+# Other
+.cache
+.tox
+.*.sw[op]
+*~
+.svn
+.tmp
+
+# Mac OSX
+.DS_Store
+oacapi_test.py
