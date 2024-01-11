@@ -11,6 +11,7 @@ pages:
     name: python:latest
   script:
   - python3 -m pip install -U sphinx sphinx-astropy
+  - python3 -m pip install .
   - cd docs && make html
   artifacts:
     paths:
