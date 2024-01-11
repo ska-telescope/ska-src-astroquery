@@ -7,6 +7,8 @@ stages:
 
 pages:
   stage: deploy
+  image:
+    name: python:latest
   script:
   - python3 -m pip install -U sphinx sphinx-astropy
   - cd docs && make html
