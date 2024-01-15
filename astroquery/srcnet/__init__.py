@@ -5,8 +5,12 @@ class Conf(_config.ConfigNamespace):
     """
     Configuration parameters for `astroquery.srcnet`.
     """
+    SRCNET_AUTHN_API_ADDRESS = _config.ConfigItem(
+        'https://authn.srcdev.skao.int/api/v1',
+        'Base address of the SRCNet AuthN API'
+        )
     SRCNET_DM_API_ADDRESS = _config.ConfigItem(
-        'https://data-management.srcdev.skao.int/api/v1/',
+        'https://data-management.srcdev.skao.int/api/v1',
         'Base address of the SRCNet Data Management API'
         )
     SRCNET_TAP_SERVICE_URL_BASE = _config.ConfigItem(
@@ -14,7 +18,7 @@ class Conf(_config.ConfigNamespace):
         'SRCNet TAP service URL'
     )
     SRCNET_DATALINK_SERVICE_URL = _config.ConfigItem(
-        'https://ivoa.dachs.srcdev.skao.int/__system__/tap/run',
+        'https://datalink.ivoa.srcdev.skao.int/rucio/links',
         'SRCNET Datalink service URL'
     )
     SRCNET_IVOA_OBSCORE_TABLE_NAME = _config.ConfigItem(
