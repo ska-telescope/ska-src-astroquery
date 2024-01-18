@@ -63,6 +63,8 @@ def exchange_token_for_service(service):
                         access_token=self.access_token))
                     log.debug("Refresh token: {refresh_token}".format(
                         refresh_token=self.refresh_token))
+
+                    self._persist_tokens()
                 else:
                     log.debug("Access token already exists for service, will not "
                               "attempt token exchange")
@@ -103,6 +105,8 @@ def refresh_token_if_expired(func):
                         access_token=self.access_token))
                     log.debug("Refresh token: {refresh_token}".format(
                         refresh_token=self.refresh_token))
+
+                    self._persist_tokens()
                 else:
                     log.debug("Access token is valid, will not attempt token refresh.")
         else:
@@ -120,10 +124,25 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     srcnet_ivoa_obscore_ra_col_name = conf.SRCNET_IVOA_OBSCORE_RA_COL_NAME
     srcnet_ivoa_obscore_dec_col_name = conf.SRCNET_IVOA_OBSCORE_DEC_COL_NAME
 
-    def __init__(self, *args, access_token=None, refresh_token=None, verbose=True):
+    def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
+                 refresh_token_path='/tmp/refresh_token', verbose=True):
         super().__init__()
 
         self.session = requests.Session()
+
+        # persist access and refresh tokens, if set
+        if access_token_path and not access_token:
+            if os.path.isfile(access_token_path):
+                with open(access_token_path, 'r') as f:
+                    access_token = f.read()
+            self.access_token_path = access_token_path
+
+        if refresh_token_path and not refresh_token:
+            if os.path.isfile(refresh_token_path):
+                with open(refresh_token_path, 'r') as f:
+                    refresh_token = f.read()
+            self.refresh_token_path = refresh_token_path
+
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._update_authorisation_requests_session()
@@ -210,6 +229,23 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         resp.raise_for_status()
         return resp.json()
 
+    def _persist_tokens(self):
+        """ Save access and refresh tokens.
+
+        :return: Nothing.
+        :rtype: None
+        """
+        if self.access_token_path:
+            log.debug("Persisting access token to: {access_token_path}".format(
+                access_token_path=self.access_token_path))
+            with open(self.access_token_path, 'w') as f:
+                f.write(self.access_token)
+        if self.refresh_token_path:
+            log.debug("Persisting refresh token to: {refresh_token_path}".format(
+                refresh_token_path=self.refresh_token_path))
+            with open(self.refresh_token_path, 'w') as f:
+                f.write(self.refresh_token)
+
     def _update_authorisation_requests_session(self):
         """ Update the requests session header with the instance's bearer token.
 
@@ -288,6 +324,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             access_token=self.access_token))
         log.debug("Refresh token: {refresh_token}".format(
             refresh_token=self.refresh_token))
+
+        self._persist_tokens()
 
     @handle_exceptions
     def query_tap(self, query, sync=True):

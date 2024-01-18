@@ -44,17 +44,39 @@ This will then be made into a GitLab page by the CI pipeline.
 
 ## Examples
 
-The examples here utilise the `srcnet.login()` function. It is advisable to keep hold of the `access_token` and `refresh_token` that result from this command due to a bug in v1.8.2 of 
-Indigo IAM. This bug does not allow you to call this function twice within the access token's lifetime i.e. you will not be able to generate a second access token until the first one has 
-expired. This has been patched in v1.8.3 of Indigo IAM.
+Some of the calls here require authentication against the prototype SRCNet. A user can authenticate by running the `srcnet.login()` function, e.g.
 
-The `access_token` and `refresh_token` can be passed to the `SRCNet()` constructor (`access_token=` and `refresh_token=` respectively) instead, circumventing the need to call this function 
-more than once.
+```
+python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); srcnet.login();"
+To login, please sign in here: <redacted>
+
+After you have signed in, please enter the returned authorisation code and state.
+Enter code: 
+Enter state: 
+
+DEBUG: Access token: <redacted>
+DEBUG: Refresh token: <redacted> [astroquery.srcnet.core]
+DEBUG: Persisting access token to: /tmp/access_token [astroquery.srcnet.core]
+DEBUG: Persisting refresh token to: /tmp/refresh_token [astroquery.srcnet.core]
+```
+
+It is strongly advisable to keep hold of the `access_token` and `refresh_token` that result from this command due to a bug in v1.8.2 of Indigo IAM. This bug 
+does not allow you to call this function twice within the access token's lifetime i.e. you will not be able to generate a second access token until the 
+first one has expired. This has been patched in v1.8.3 of Indigo IAM.
+
+To help, access tokens and refresh tokens can be persisted by passing an `access_token_path` and `refresh_token_path` to the constructor, pointing to 
+where the access tokens and refresh tokens will be stored (default is `/tmp/access_token` and `/tmp/refresh_token` respectively). Setting these to `None` will disable 
+token persistence. The `access_token` and `refresh_token` can also be passed to the `SRCNet()` constructor (`access_token` and `refresh_token` parameters respectively) 
+directly if required. 
+
+The following examples presume that the user has previously logged in as above and has persisted their tokens.
 
 ### query_region
 
+Query for results around a region.
+
 ```bash
-$ python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); srcnet.login(); q=srcnet.query_region(coordinates='82.1deg 12.58deg', radius=0.01); print(q)"
+$ python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); q=srcnet.query_region(coordinates='82.1deg 12.58deg', radius=0.01); print(q)"
 
 <Table length=1>
 dataproduct_type dataproduct_subtype calib_level obs_collection       obs_id      ... em_ucd preview  source_table         dist        
@@ -66,8 +88,10 @@ dataproduct_type dataproduct_subtype calib_level obs_collection       obs_id    
 
 ### query_object
 
+Resolve an object and query for results around it.
+
 ```bash
-$ python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); srcnet.login(); q=srcnet.query_object(object_name='PTF10tce', radius=0.01); print(q)"
+$ python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); q=srcnet.query_object(object_name='PTF10tce', radius=0.01); print(q)"
 
 <Table length=1>
 dataproduct_type dataproduct_subtype calib_level   obs_collection   ... em_ucd preview  source_table          dist        
@@ -79,10 +103,16 @@ dataproduct_type dataproduct_subtype calib_level   obs_collection   ... em_ucd p
 
 ### get_data
 
-```bash
- python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); srcnet.login(); q=srcnet.get_data(namespace='testing', name='PTF10tce.fits')"
+Get data from the datalake given a namespace and name.
 
-DEBUG: Access token already exists for service, will not attempt token exchange [astroquery.srcnet.core]
+```bash
+$ python3 -c "from astroquery.srcnet import SRCNet; srcnet=SRCNet(); q=srcnet.get_data(namespace='testing', name='PTF10tce.fits')"
+
+INFO: Exchanged authn-api service token for data-management-api service [astroquery.srcnet.core]
+DEBUG: Access token: <redacted>
+DEBUG: Refresh token: <redacted>
+DEBUG: Persisting access token to: /tmp/access_token [astroquery.srcnet.core]
+DEBUG: Persisting refresh token to: /tmp/refresh_token [astroquery.srcnet.core]
 DEBUG: Access token is valid, will not attempt token refresh. [astroquery.srcnet.core]
 8248KB downloaded
 ```
