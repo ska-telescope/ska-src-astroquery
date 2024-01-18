@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import requests
 import time
 from functools import wraps
@@ -125,6 +126,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         self.session = requests.Session()
         self._access_token = access_token
         self._refresh_token = refresh_token
+        self._update_authorisation_requests_session()
+
         if verbose:
             log.setLevel('DEBUG')
 
@@ -240,8 +243,12 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             raise UnsupportedAccessProtocol(access_url.split(':')[0])
 
         # get a token for storage
-        #FIXME: DM API doesn't have a get_download_token endpoint so this isn't implemented
-        storage_access_token = ''
+        get_download_token_namespace_endpoint = "{api_url}/data/download/{namespace}".format(
+            api_url=self.srcnet_dm_api_base_address, namespace=namespace)
+        resp = self.session.get(get_download_token_namespace_endpoint)
+        resp.raise_for_status()
+
+        storage_access_token = resp.json().get('access_token')
 
         # download
         resp = requests.get(access_url, headers={
@@ -249,7 +256,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         }, stream=True)
         resp.raise_for_status()
         with open(name, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024):
+            for chunk in resp.iter_content(chunk_size=1024):
                 print("{}KB downloaded".format(round(os.path.getsize(name) / 1024), 0), end='\r')
                 f.write(chunk)
                 f.flush()
