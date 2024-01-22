@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import random
 import requests
 import time
 from functools import wraps
@@ -262,12 +263,23 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     @exchange_token_for_service('data-management-api')
     @refresh_token_if_expired
     def get_data(self, namespace, name):
+        # query DM API to locate file
+        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=random".format(
+            api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name)
+        resp = self.session.get(locate_data_endpoint)
+        resp.raise_for_status()
+        access_url = random.choice(list(resp.json().items()))[1][0]
+
+        ''' 
+        # This uses the Datalink service.
+        #
         # query the datalink service for the identifier
         datalink_url = '{datalink_base_url}?id={namespace}:{name}'.format(
             datalink_base_url=self.srcnet_datalink_service_url,
             namespace=namespace,
             name=name
         )
+
         datalink = DatalinkResults.from_result_url(datalink_url)
 
         # take the link with semantic "#this"
@@ -275,10 +287,12 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         # get the physical file path (on storage) from this link
         access_url = this.access_url
+        '''
         if access_url.startswith('https') or access_url.startswith('davs'):
             pass
         else:
             raise UnsupportedAccessProtocol(access_url.split(':')[0])
+
 
         # get a token for storage
         get_download_token_namespace_endpoint = "{api_url}/data/download/{namespace}".format(

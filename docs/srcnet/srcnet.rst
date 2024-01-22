@@ -165,7 +165,7 @@ package version number.
 Docs
 ^^^^
 
-To build the docs first install ``sphinx-astropy``:
+To manually build the docs first install ``sphinx-astropy``:
 
 .. code-block:: bash
 
@@ -177,7 +177,7 @@ Then run the sphinx ``html`` Make target:
 
     ska-src-astroquery$ cd docs && make html
 
-This will then be made into a GitLab page by the CI pipeline.
+The docs are automatically made into a GitLab page by the CI pipeline.
 
 Footnotes
 ---------
