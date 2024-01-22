@@ -6,6 +6,8 @@ stages:
 - deploy
 
 pages:
+  only:
+    - main
   stage: deploy
   image:
     name: python:latest
@@ -17,8 +19,6 @@ pages:
     paths:
       - docs/_build/html
   publish: docs/_build/html
-  only:
-    - main
 
 pypi-publish:
   only:

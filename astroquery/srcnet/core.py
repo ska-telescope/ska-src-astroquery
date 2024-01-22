@@ -125,7 +125,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     srcnet_ivoa_obscore_dec_col_name = conf.SRCNET_IVOA_OBSCORE_DEC_COL_NAME
 
     def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
-                 refresh_token_path='/tmp/refresh_token', verbose=True):
+                 refresh_token_path='/tmp/refresh_token', verbose=False):
         super().__init__()
 
         self.session = requests.Session()
@@ -149,6 +149,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         if verbose:
             log.setLevel('DEBUG')
+        else:
+            log.setLevel('INFO')
 
     @property
     def access_token(self):
