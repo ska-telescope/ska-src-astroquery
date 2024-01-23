@@ -32,7 +32,7 @@ def exchange_token_for_service(service):
     def exchange_token(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            if self.access_token and self.refresh_token:
+            if self.access_token and self.refresh_token:                                                                #FIXME: Can exchange token rather than using refresh flow in v1.8.3
                 audience = self._decode_access_token().get('aud')
                 if audience != service:
                     exchange_token_endpoint = \
@@ -70,8 +70,8 @@ def exchange_token_for_service(service):
                     log.debug("Access token already exists for service, will not "
                               "attempt token exchange")
             else:
-                log.debug("No access token or refresh token are set, will not attempt "
-                          "token exchange.")
+                log.debug("Either access token or refresh token are not set, will not "
+                          "attempt token exchange.")
             return func(self, *args, **kwargs)
         return wrapper
     return exchange_token
@@ -111,7 +111,8 @@ def refresh_token_if_expired(func):
                 else:
                     log.debug("Access token is valid, will not attempt token refresh.")
         else:
-            log.debug("No access token or refresh token are set, will not attempt token refresh.")
+            log.debug("Either access token or refresh token are not set, will not "
+                      "attempt token refresh.")
         return func(self, *args, **kwargs)
     return wrapper
 
@@ -131,22 +132,29 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         self.session = requests.Session()
 
-        # persist access and refresh tokens, if set
-        if access_token_path and not access_token:
-            if os.path.isfile(access_token_path):
-                with open(access_token_path, 'r') as f:
-                    access_token = f.read()
-            self.access_token_path = access_token_path
+        self.access_token_path = access_token_path
+        self.refresh_token_path = refresh_token_path
 
-        if refresh_token_path and not refresh_token:
-            if os.path.isfile(refresh_token_path):
-                with open(refresh_token_path, 'r') as f:
-                    refresh_token = f.read()
-            self.refresh_token_path = refresh_token_path
-
+        # check for access tokens in constructor, environment then persisted file (in that order)
+        if access_token:
+            pass
+        elif os.environ.get('ACCESS_TOKEN', False):
+            access_token = os.environ.get('ACCESS_TOKEN')
+        elif os.path.isfile(access_token_path):
+            with open(access_token_path, 'r') as f:
+                access_token = f.read()
         self._access_token = access_token
+        self._update_authorisation_requests_session()       # use this access token as the bearer token for requests
+
+        # check for refresh tokens in constructor, environment then persisted file (in that order)
+        if refresh_token:
+            pass
+        elif os.environ.get('REFRESH_TOKEN', False):
+            refresh_token = os.environ.get('REFRESH_TOKEN')
+        elif os.path.isfile(refresh_token_path):
+            with open(refresh_token_path, 'r') as f:
+                refresh_token = f.read()
         self._refresh_token = refresh_token
-        self._update_authorisation_requests_session()
 
         if verbose:
             log.setLevel('DEBUG')
@@ -264,7 +272,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     @refresh_token_if_expired
     def get_data(self, namespace, name):
         # query DM API to locate file
-        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=random".format(
+        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=random".format(                           #FIXME: should be nearest_by_ip, but doesn't work with local testing
             api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name)
         resp = self.session.get(locate_data_endpoint)
         resp.raise_for_status()
@@ -292,7 +300,6 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             pass
         else:
             raise UnsupportedAccessProtocol(access_url.split(':')[0])
-
 
         # get a token for storage
         get_download_token_namespace_endpoint = "{api_url}/data/download/{namespace}".format(

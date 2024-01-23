@@ -51,7 +51,7 @@ your web browser to the application in order to complete the authentication proc
     DEBUG: Persisting refresh token to: /tmp/refresh_token [astroquery.srcnet.core]
 
 Due to an ongoing issue in Indigo IAM v1.8.2 [1]_, it is strongly advisable to keep hold of the ``access_token`` and
-``refresh_token`` that result from this command **and any subsequent commands**. The consequence of this issue is that
+``refresh_token`` that result from this command **and any subsequent commands**. One consequence of this issue is that
 subsequent calls to the ``login`` function within the first access token's lifetime (default=1 hour) will yield a
 HTTP 500; you have to wait until the first access token has expired before you can run this function again.
 
@@ -59,7 +59,12 @@ To circumvent this, and for convenience, access tokens and refresh tokens can be
 an ``access_token_path`` and ``refresh_token_path`` to the ``SRCNet`` constructor, pointing to where the access tokens
 and refresh tokens will be stored locally (default is ``/tmp/access_token`` and ``/tmp/refresh_token`` respectively).
 Setting these to ``None`` will disable token persistence. The ``access_token`` and ``refresh_token`` can also be passed
-to the ``SRCNet()`` constructor (``access_token`` and ``refresh_token`` parameters respectively) directly if required.
+to the ``SRCNet()`` constructor (``access_token`` and ``refresh_token`` parameters respectively) directly if required,
+or via the environment variables ``ACCESS_TOKEN`` and ``REFRESH_TOKEN`` respectively. The order in which these
+locations are checked are first the constructor, the environment and then finally local paths.
+
+Due to token exchanges that occur within the client, if you're passing a token in through the constructor or
+environment **this token may become invalid**. This is another consequence of [1]_.
 
 If persisting tokens, be aware that they are stored in plaintext locally. This is especially a concern for the refresh
 token, which if compromised can be used to generate new access tokens on-demand for the entirety of the refresh
