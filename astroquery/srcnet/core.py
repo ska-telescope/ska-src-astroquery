@@ -270,47 +270,51 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     @handle_exceptions
     @exchange_token_for_service('data-management-api')
     @refresh_token_if_expired
-    def get_data(self, namespace, name, storage_area_uuid="448e27fe-b695-4f91-90c3-0a8f2561ccdf"):                      #FIXME hardcoded
-        # query DM API to locate file
-        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=nearest_by_ip".format(
-            api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name)
+    def get_data(self, namespace, name, sort='nearest_by_ip', ip_address=None):
+        """ Locate and download data given a data identifier.
+
+        :param str namespace: The data identifier's namespace.
+        :param str name: The data identifier's name.
+        :param str sort: The sorting algorithm to use (random || nearest_by_ip)
+        :param str ip_address: The ip address to geolocate the nearest replica to. Leave blank to use the requesting
+            client ip (sort == nearest_by_ip only)
+
+        :return: Nothing
+        :rtype: None
+        """
+        # query DM API to get a list of data replicas for this namespace/name and pick the first
+        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort={sort}&ip_address={ip_address}".format(
+            api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name, sort=sort,
+            ip_address=ip_address if ip_address else "")
         resp = self.session.get(locate_data_endpoint)
         resp.raise_for_status()
-        access_url = random.choice(list(resp.json().items()))[1][0]
+        location_response = resp.json()
 
-        ''' 
-        # This uses the Datalink service.
-        #
-        # query the datalink service for the identifier
-        datalink_url = '{datalink_base_url}?id={namespace}:{name}'.format(
-            datalink_base_url=self.srcnet_datalink_service_url,
-            namespace=namespace,
-            name=name
-        )
+        # pick the first replica from the first site in the response (ordered if sorting algorithm is used)
+        position = 0
+        rse = location_response[position].get('identifier')
+        replicas = location_response[position].get('replicas')
+        associated_storage_area_id = location_response[position].get('associated_storage_area_id')
 
-        datalink = DatalinkResults.from_result_url(datalink_url)
+        # pick a random replica from this site (only relevant if multiple exist)
+        access_url = random.choice(replicas)
 
-        # take the link with semantic "#this"
-        this = next(datalink.bysemantics("#this"))
-
-        # get the physical file path (on storage) from this link
-        access_url = this.access_url
-        '''
+        # download the data
+        log.info("Downloading data from {rse} ({access_url})".format(rse=rse, access_url=access_url))
         if access_url.startswith('https') or access_url.startswith('davs'):
             pass
         else:
             raise UnsupportedAccessProtocol(access_url.split(':')[0])
 
-        # get a token for storage
+        # get the storage read access token for the associated storage area
         get_download_token_namespace_endpoint = "{api_url}/data/download/{storage_area_uuid}/{namespace}/{name}".format(
-            api_url=self.srcnet_dm_api_base_address, storage_area_uuid=storage_area_uuid, namespace=namespace,
+            api_url=self.srcnet_dm_api_base_address, storage_area_uuid=associated_storage_area_id, namespace=namespace,
             name=name)
         resp = self.session.get(get_download_token_namespace_endpoint)
         resp.raise_for_status()
-
         storage_access_token = resp.json().get('access_token')
 
-        # download
+        # download data using this access token
         resp = requests.get(access_url, headers={
             'Authorization': 'Bearer {access_token}'.format(access_token=storage_access_token)
         }, stream=True)
