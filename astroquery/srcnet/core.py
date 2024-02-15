@@ -270,9 +270,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     @handle_exceptions
     @exchange_token_for_service('data-management-api')
     @refresh_token_if_expired
-    def get_data(self, namespace, name):
+    def get_data(self, namespace, name, storage_area_uuid="448e27fe-b695-4f91-90c3-0a8f2561ccdf"):                      #FIXME hardcoded
         # query DM API to locate file
-        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=random".format(                           #FIXME: should be nearest_by_ip, but doesn't work with local testing
+        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort=nearest_by_ip".format(
             api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name)
         resp = self.session.get(locate_data_endpoint)
         resp.raise_for_status()
@@ -302,8 +302,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             raise UnsupportedAccessProtocol(access_url.split(':')[0])
 
         # get a token for storage
-        get_download_token_namespace_endpoint = "{api_url}/data/download/{namespace}".format(
-            api_url=self.srcnet_dm_api_base_address, namespace=namespace)
+        get_download_token_namespace_endpoint = "{api_url}/data/download/{storage_area_uuid}/{namespace}/{name}".format(
+            api_url=self.srcnet_dm_api_base_address, storage_area_uuid=storage_area_uuid, namespace=namespace,
+            name=name)
         resp = self.session.get(get_download_token_namespace_endpoint)
         resp.raise_for_status()
 
