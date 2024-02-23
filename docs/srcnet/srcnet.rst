@@ -20,8 +20,8 @@ Quickstart
 .. code-block:: python
 
     >>> from astroquery.srcnet import SRCNet
-    >>> srcnet=SRCNet(verbose=True);
-    >>> srcnet.login();                                                        # should only be run once every hour maximum
+    >>> srcnet=SRCNet(verbose=True)
+    >>> srcnet.login()                                                         # should only be run once every hour maximum
     >>> q1=srcnet.query_region(coordinates='82.1deg 12.58deg', radius=0.01)    # example query_region
     >>> q2=srcnet.query_object(object_name='PTF10tce', radius=0.01)            # example query_object
     >>> q3=srcnet.get_data(namespace='testing', name='PTF10tce.fits')          # example get_data
@@ -30,20 +30,41 @@ Authentication
 --------------
 
 For authenticated requests, there is a ``login`` function. This function will guide you through an auth flow to identify
-yourself to the APIs required to perform the requests. You must provide both the ``code`` and ``state`` displayed in
-your web browser to the application in order to complete the authentication process, e.g.
+yourself to the APIs required to perform the requests, e.g.
 
 .. code-block:: python
 
     >>> from astroquery.srcnet import SRCNet
-    >>> srcnet=SRCNet(verbose=True);
-    >>> srcnet.login();
+    >>> srcnet=SRCNet(verbose=True)
+    >>> srcnet.login()
 
-    To login, please sign in here: <redacted>
+    --------------------------------------------------
 
-    After you have signed in, please enter the returned authorisation code and state.
-    Enter code: <redacted>
-    Enter state: <redacted>
+    Scan the QR code, or using a browser on another
+    device, visit https://ska-iam.stfc.ac.uk/device
+    and enter code XXXYYY
+
+    ▄▄▄▄▄▄▄ ▄   ▄   ▄ ▄▄▄ ▄▄▄▄▄▄▄
+    █ ▄▄▄ █ ▄██▀▀▄▄▄█ ▄▄  █ ▄▄▄ █
+    █ ███ █ █▀▀█▄▀▀██▀▀▄  █ ███ █
+    █▄▄▄▄▄█ ▄ █ █ ▄ ▄▀█▀▄ █▄▄▄▄▄█
+    ▄▄▄▄  ▄ ▄ ██▄▄█ ▀█▄▀ ▄  ▄▄▄ ▄
+    ▄  ▀▄▀▄█▄▄█▄▄█▀ █▄▄▀ ▀█▀▀ ▄▄▀
+    ▄▀▄▄▄ ▄ ▄██▄ ██▀▄▄▀  ▀▀▀▀▄▄ ▀
+    ▄█▄▄▄▀▄█▄█▄▀▀ ▀▀ ▄ █  ██  ███
+    ▄█▄▄  ▄▄▀█  █▄▀▀▀  ▀█▄ ▄█▄ █
+    ▄▀▀█ █▄▄▄ ▄ █▄▄█▄█  ▀ ▄█ ▀█▀
+    ▄▀█▄▀▄▀██▀█▄ ▄▀▄██▄▄█▄██▄█
+    ▄▄▄▄▄▄▄ ▀ █▄    █▄███ ▄ ██▀█▀
+    █ ▄▄▄ █  ▀▄▄ █▄ ▀▄  █▄▄▄█▀▄▄
+    █ ███ █ ██ ▀█▄█▀█▀▄█   █▀▀▄▀█
+    █▄▄▄▄▄█ █▀  ▄▄█ █ ▄██ ██ █ █
+
+    --------------------------------------------------
+
+    Polling for token... (3/60)
+
+    Successfully polled for token. You are now logged in.
 
     DEBUG: Access token: <redacted>
     DEBUG: Refresh token: <redacted> [astroquery.srcnet.core]

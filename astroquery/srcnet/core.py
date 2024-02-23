@@ -1,8 +1,10 @@
 import base64
 import json
 import os
+import qrcode
 import random
 import requests
+import textwrap
 import time
 from functools import wraps
 
@@ -212,33 +214,72 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         return json.loads(token_payload_decoded)
 
-    def _login_via_auth_code(self):
-        """ Begin an OIDC authorization_code login flow. "
+    def _login_via_device(self):
+        """ Begin an OIDC device flow. "
 
         :return: A token.
         :rtype: Dict
         """
 
-        login_endpoint = "{api_url}/login".format(api_url=self.srcnet_authn_api_address)
-        token_endpoint = "{api_url}/token".format(api_url=self.srcnet_authn_api_address)
+        login_endpoint = "{api_url}/login/device".format(api_url=self.srcnet_authn_api_address)
+        token_endpoint = "{api_url}/token?device_code={{device_code}}".format(api_url=self.srcnet_authn_api_address)
 
         # redirect user to IAM
-        resp = self.session.get(login_endpoint)
-        resp.raise_for_status()
-        print("To login, please sign in here: {}\n".format(resp.json().get(
-            'authorization_uri')))
+        device_authorization_response = self.session.get(login_endpoint)
+        device_authorization_response.raise_for_status()
 
-        # retrieve the code from IAM and exchange for a token
-        print("After you have signed in, please enter the returned authorisation code "
-              "and state.")
-        code = input("Enter code: ")
-        state = input("Enter state: ")
-        resp = self.session.get(token_endpoint, params={
-            "code": code,
-            "state": state
-        })
-        resp.raise_for_status()
-        return resp.json()
+        # make an ascii qr code for the complete verification uri
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(device_authorization_response.json().get('verification_uri_complete'))
+
+        # add instructional text for user if they don't want to use qr code
+        user_instruction_text = ("Scan the QR code, or using a browser on another device, visit " +
+                                 "{verification_uri} and enter code {user_code}".format(
+                                     verification_uri=device_authorization_response.json().get('verification_uri'),
+                                     user_code=device_authorization_response.json().get('user_code')))
+
+        wrapped_string = textwrap.fill(user_instruction_text, width=50)
+        print()
+        print("-" * 50)
+        print()
+        print(wrapped_string)
+        qr.print_ascii()
+        print("-" * 50)
+        print()
+
+        # poll for user to complete authorisation process
+        success = False
+        max_attempts = 60
+        for attempt in range(0, max_attempts):
+            try:
+                # the following will raise before the break if the authorization is still pending
+                token_response = self.session.get(token_endpoint.format(
+                    device_code=device_authorization_response.json().get('device_code')))
+                token_response.raise_for_status()
+                success = True
+                break
+            except Exception as e:
+                pass
+            print("Polling for token... ({attempt}/{max_attempts})".format(
+                attempt=attempt + 1, max_attempts=max_attempts), end='\r')
+            time.sleep(5)
+        print()
+        print()
+        if success:
+            print("Successfully polled for token. You are now logged in.")
+            print()
+            return token_response.json()
+        else:
+            print("Failed to poll for token. Please try again.")
+            print()
+            return {}
+        print()
+
 
     def _persist_tokens(self):
         """ Save access and refresh tokens.
@@ -327,7 +368,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         print('\n')
 
     @handle_exceptions
-    def login(self, requested_oidc_flow='authorization_code'):
+    def login(self, requested_oidc_flow='device'):
         """ Log in using an OIDC flow.
 
         Updates authorisation in the instance's session header if successful.
@@ -336,8 +377,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         :rtype: None
         """
         # start an OIDC flow
-        if requested_oidc_flow == 'authorization_code':
-            resp = self._login_via_auth_code()
+        if requested_oidc_flow == 'device':
+            resp = self._login_via_device()
         else:
             raise UnsupportedOIDCFlow(requested_oidc_flow)
         token = resp.get('token', {})
