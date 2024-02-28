@@ -4,6 +4,7 @@ import os
 import qrcode
 import random
 import requests
+import sys
 import textwrap
 import time
 from functools import wraps
@@ -264,7 +265,10 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 success = True
                 break
             except Exception as e:
-                pass
+                try:
+                    log.debug(token_response.json())
+                except requests.exceptions.JSONDecodeError:
+                    pass
             print("Polling for token... ({attempt}/{max_attempts})".format(
                 attempt=attempt + 1, max_attempts=max_attempts), end='\r')
             time.sleep(5)
