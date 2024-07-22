@@ -14,7 +14,7 @@ class Conf(_config.ConfigNamespace):
         'Base address of the SRCNet Data Management API'
         )
     SRCNET_TAP_SERVICE_URL_BASE = _config.ConfigItem(
-        'https://ivoa.dachs.srcdev.skao.int/__system__/tap/run',
+        'https://dachs.ivoa.srcdev.skao.int/__system__/tap/run',
         'SRCNet TAP service URL'
     )
     SRCNET_DATALINK_SERVICE_URL = _config.ConfigItem(
