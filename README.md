@@ -1,3 +1,37 @@
+# SODA cutout astroquery method example
+
+A new method has been added to `astroquery/srcnet/core.py`.
+It is still work in progress.
+
+One way to easily test it is to create a Python virtual environment and use it in Developer mode:
+
+```
+git clone https://gitlab.com/ska-telescope/src/src-service-apis/ska-src-astroquery.git
+cd ska-src-astroquery/
+git checkout ajm-mag-1011
+python3 -m soda venv
+python3 -m venv soda
+source soda/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -e .
+```
+
+Run the example script:
+```
+python soda_example.py
+```
+
+If you have access to the access to the 'data/namespaces/testing' SKA-IAM group, the cutout file should be produced 
+and saved in the 'output' folder.
+
+To do:
+- Better error handling
+- Rename variables and modify style for consistency with existing methods
+- Accept all SODA filtering parameters
+
+---
+---
+
 # ska-src-astroquery
 
 

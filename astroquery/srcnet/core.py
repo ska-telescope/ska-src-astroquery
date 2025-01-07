@@ -523,6 +523,63 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         return self.query_tap(query=query, sync=sync)
 
+    @handle_exceptions
+    def soda_cutout(self, soda_url, dataset_path, file_name, filtering_parameter, 
+                    ra, dec, radius, output_path, output_filename):
+        """ Perform SODA cutout
+
+        :param str soda_url (URL for the SODA service)
+        :param str dataset_path.
+        :param str file_name.
+        :param str filtering_parameter (CIRCLE).
+        :param float ra (ICRS in deg).
+        :param float dec (ICRS in deg).
+        :param float radius (deg).
+        :param str output_path.
+        :param str output_filename.
+
+        :return: The query response.
+        :rtype: FITS file
+        """
+
+        # Get an SKA IAM token
+        if not self.access_token:
+            log.info("No valid access token found. Logging in...")
+            self.login()
+
+        # Only "CIRCLE" works for now
+        if filtering_parameter == "CIRCLE":
+            circle_str = f"{ra} {dec} {radius}"
+        else:
+            raise ValueError(f"Unsupported filtering parameter: {filtering_parameter}")
+
+        dataset_path_and_file_name = f"{dataset_path}/{file_name}"
+        full_id = f"ivo://test.skao/datasets/fits?{dataset_path_and_file_name}"
+
+        # Make the request to SODA
+        params = {
+            "ID": full_id,
+            filtering_parameter: circle_str,     # e.g. "CIRCLE": "351.986728 8.778684 0.1"
+            "RESPONSE_FORMAT": "application/fits"
+        }
+
+        log.info(f"Requesting SODA cutout from {soda_url} with params={params}")
+        response = self.session.get(soda_url, params=params, stream=True)
+        response.raise_for_status()
+
+        # Write the SODA response to the output file
+        # Should it use get_data method here?
+        os.makedirs(output_path, exist_ok=True)
+        output_path_and_filename = os.path.join(output_path, output_filename)
+        with open(output_path_and_filename, "wb") as f:
+            for chunk in response.iter_content(chunk_size=4096):
+                f.write(chunk)
+                f.flush()
+        print('\n')
+
+        log.info(f"SODA cutout saved to '{output_path_and_filename}'")
+
+        return output_path_and_filename
 
 SRCNet = SRCNetClass()
 
