@@ -18,6 +18,7 @@ from astroquery.utils.class_or_instance import class_or_instance
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from pyvo.dal.adhoc import DatalinkResults
+from urllib.parse import urlencode
 from . import conf
 
 from astroquery.srcnet.exceptions import (handle_exceptions,
@@ -524,19 +525,23 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         return self.query_tap(query=query, sync=sync)
 
     @handle_exceptions
-    def soda_cutout(self, soda_url, dataset_path, file_name, filtering_parameter, 
-                    ra, dec, radius, output_path, output_filename):
+    def soda_cutout(self, namespace, name, output_file,
+                    sort=None, client_ip_address=None,
+                    pos=None, circle=None, polygon=None, range_=None, time=None, band=None, pol=None):
         """ Perform SODA cutout
 
-        :param str soda_url (URL for the SODA service)
-        :param str dataset_path.
-        :param str file_name.
-        :param str filtering_parameter (CIRCLE).
-        :param float ra (ICRS in deg).
-        :param float dec (ICRS in deg).
-        :param float radius (deg).
-        :param str output_path.
-        :param str output_filename.
+        :param str namespace: The scope where the data is stored e.g. testing.
+        :param str name: Filename e.g. PTF10tce.fits.
+        :param str sort: (Optional) Specify how the Datalink searches for the SODA service; 'nearest_by_ip' (default) or 'random'.
+        :param str client_ip_address: (Optional) Specify the SODA service IP address e.g. 130.246.210.110. Overrides 'sort'.
+        :param str pos: Alternative to CIRCLE, BOX, or POLYGON e.g. "CIRCLE 351.9 8.77 0.1".
+        :param str circle: (longitude, latitude, radius) e.g. (351.986728, 8.778684, 0.1).
+        :param str polygon: List of several (longitude, latitude) e.g. [(351.9, 8.77), (352.0, 8.7), (352.05, 8.6)].
+        :param str range_: (lon1, lon2, lat1, lat2) Note the appended underscore '_' as 'range' is a standard python function.
+        :param str band: wavelength interval values e.g. BAND=-Inf 300.
+        :param str time: time interval values e.g. TIME=55123.456 55123.466.
+        :param str pol: polarization states e.g. POL=Q.
+        :param str output_file: Path and filename of the resulting cutout file e.g. output/output_file.fits
 
         :return: The query response.
         :rtype: FITS file
@@ -547,39 +552,128 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             log.info("No valid access token found. Logging in...")
             self.login()
 
-        # Only "CIRCLE" works for now
-        if filtering_parameter == "CIRCLE":
-            circle_str = f"{ra} {dec} {radius}"
-        else:
-            raise ValueError(f"Unsupported filtering parameter: {filtering_parameter}")
+        # Use the srcdev.skao.int datalink and add appropriate parameters
+        base_url = "https://datalink.ivoa.srcdev.skao.int/rucio/links"
 
-        dataset_path_and_file_name = f"{dataset_path}/{file_name}"
-        full_id = f"ivo://test.skao/datasets/fits?{dataset_path_and_file_name}"
+        if sort is None:
+            sort = "nearest_by_ip"
 
-        # Make the request to SODA
-        params = {
-            "ID": full_id,
-            filtering_parameter: circle_str,     # e.g. "CIRCLE": "351.986728 8.778684 0.1"
-            "RESPONSE_FORMAT": "application/fits"
+        url_params = {
+            "id": f"{namespace}:{name}",
+            "must_include_soda": "True",
+            "sort": sort,
         }
 
-        log.info(f"Requesting SODA cutout from {soda_url} with params={params}")
-        response = self.session.get(soda_url, params=params, stream=True)
+        if client_ip_address:
+            url_params["client_ip_address"] = client_ip_address
+
+        datalink_url = f"{base_url}?{urlencode(url_params)}"
+        log.info(f"Using Datalink: {datalink_url}")
+
+        datalink_xml = DatalinkResults.from_result_url(datalink_url, session=self.session)
+
+        # Search for and extract the accessURL and ID from the Datalink XML
+        for resource in datalink_xml.votable.resources:
+            if resource.type == "meta":
+                if getattr(resource, "ID", None) == "soda-sync":
+                    soda_service = None
+                    id_param = None
+
+                for param in resource.params:
+                    if param.name == "accessURL":
+                        soda_service = param.value
+
+                if resource.groups:
+                    for group in resource.groups:
+                        for entry in group.entries:
+                            if entry.name == "ID":
+                                id_param = entry.value
+                break
+
+        if not soda_service:
+            raise ValueError("Error: SODA service accessURL not found in datalink response.")
+        if not id_param:
+            raise ValueError("Error: Dataset ID not found in datalink response.")
+
+        log.info(f"Extracted SODA Service: {soda_service}")
+        log.info(f"Extracted ID: {id_param}")
+
+        # Initialise the 'params' dictionary and start adding the required information for the SODA call
+        params = {}
+        params["ID"] = id_param
+        params["RESPONSEFORMAT"] = "application/fits"
+
+        ### Handle the SODA filtering parameters
+        ### https://www.ivoa.net/documents/SODA/20170517/REC-SODA-1.0.html#tth_sEc3.3
+        #
+
+        # "POS" filering parameter
+        if pos:
+            params["POS"] = pos
+        # "CIRCLE" filtering parameter
+        elif circle:
+            if len(circle) != 3:
+               raise ValueError(f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
+            longitude, latitude, radius = circle
+            params["POS"] = f"CIRCLE {longitude} {latitude} {radius}"
+        # "POLYGON" filtering parameter
+        elif polygon:
+            spatial_region = []
+            for (longitude, latitude) in polygon:
+                spatial_region.append(str(longitude))
+                spatial_region.append(str(latitude))
+            params["POS"] = f"POLYGON {' '.join(spatial_region)}"
+        # "RANGE" filtering parameter
+        elif range_:
+            if len(range_) != 4:
+                raise ValueError(f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
+            longitude1, longitude2, latitude1, latitude2 = range_
+            params["POS"] = f"RANGE {longitude1} {longitude2} {latitude1} {latitude2}"
+        else:
+            log.info(f"No positional region cutout set.")
+            pass
+
+        # "BAND" filtering parameter
+        if band:
+            if "POS" not in params:
+                raise ValueError("A positional cutout is also required when using 'BAND'")
+            log.info(f"Performing a Band cutout with params={params}")
+            params["BAND"] = band
+
+        # "TIME" filtering parameter
+        if time:
+            if "POS" not in params:
+                raise ValueError("A positional cutout is also required when using 'TIME'")
+            log.info(f"Performing a Time cutout with params={params}")
+            params["TIME"] = time
+
+        # "POL" filtering parameter
+        if pol:
+            if "POS" not in params:
+                raise ValueError("A positional cutout is also required when using 'POL'")
+            log.info(f"Performing a Polarization cutout with params={params}")
+            params["POL"] = pol
+        #
+        ###
+
+        # Make the request to SODA
+        log.info(f"Requesting SODA cutout from {soda_service} with params={params}")
+        response = self.session.get(soda_service, params=params, stream=True)
         response.raise_for_status()
 
-        # Write the SODA response to the output file
-        # Should it use get_data method here?
-        os.makedirs(output_path, exist_ok=True)
-        output_path_and_filename = os.path.join(output_path, output_filename)
-        with open(output_path_and_filename, "wb") as f:
+        # Write the SODA response as an output file
+        output_dir = os.path.dirname(output_file)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        with open(output_file, "wb") as f:
             for chunk in response.iter_content(chunk_size=4096):
                 f.write(chunk)
                 f.flush()
         print('\n')
 
-        log.info(f"SODA cutout saved to '{output_path_and_filename}'")
+        log.info(f"SODA cutout saved to '{output_file}'")
 
-        return output_path_and_filename
+        return output_file
 
 SRCNet = SRCNetClass()
 

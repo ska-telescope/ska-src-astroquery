@@ -1,7 +1,6 @@
 # SODA cutout astroquery method example
 
 A new method has been added to `astroquery/srcnet/core.py`.
-It is still work in progress.
 
 One way to easily test it is to create a Python virtual environment and use it in Developer mode:
 
@@ -23,11 +22,6 @@ python soda_example.py
 
 If you have access to the access to the 'data/namespaces/testing' SKA-IAM group, the cutout file should be produced 
 and saved in the 'output' folder.
-
-To do:
-- Better error handling
-- Rename variables and modify style for consistency with existing methods
-- Accept all SODA filtering parameters
 
 ---
 ---
