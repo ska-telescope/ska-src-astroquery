@@ -547,13 +547,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         :rtype: FITS file
         """
 
-        # Get an SKA IAM token
-        if not self.access_token:
-            log.info("No valid access token found. Logging in...")
-            self.login()
-
         # Use the srcdev.skao.int datalink and add appropriate parameters
-        base_url = "https://datalink.ivoa.srcdev.skao.int/rucio/links"
+        srcnet_datalink_service_url = conf.SRCNET_DATALINK_SERVICE_URL
 
         if sort is None:
             sort = "nearest_by_ip"
@@ -567,8 +562,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if client_ip_address:
             url_params["client_ip_address"] = client_ip_address
 
-        datalink_url = f"{base_url}?{urlencode(url_params)}"
-        log.info(f"Using Datalink: {datalink_url}")
+        datalink_url = f"{srcnet_datalink_service_url}?{urlencode(url_params)}"
+        log.debug(f"Using Datalink: {datalink_url}")
 
         datalink_xml = DatalinkResults.from_result_url(datalink_url, session=self.session)
 
@@ -595,8 +590,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if not id_param:
             raise ValueError("Error: Dataset ID not found in datalink response.")
 
-        log.info(f"Extracted SODA Service: {soda_service}")
-        log.info(f"Extracted ID: {id_param}")
+        log.debug(f"Extracted SODA Service: {soda_service}")
+        log.debug(f"Extracted ID: {id_param}")
 
         # Initialise the 'params' dictionary and start adding the required information for the SODA call
         params = {}
@@ -630,28 +625,28 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             longitude1, longitude2, latitude1, latitude2 = range_
             params["POS"] = f"RANGE {longitude1} {longitude2} {latitude1} {latitude2}"
         else:
-            log.info(f"No positional region cutout set.")
+            log.warning(f"No positional region cutout set.")
             pass
 
         # "BAND" filtering parameter
         if band:
             if "POS" not in params:
                 raise ValueError("A positional cutout is also required when using 'BAND'")
-            log.info(f"Performing a Band cutout with params={params}")
+            log.debug(f"Performing a Band cutout with params={params}")
             params["BAND"] = band
 
         # "TIME" filtering parameter
         if time:
             if "POS" not in params:
                 raise ValueError("A positional cutout is also required when using 'TIME'")
-            log.info(f"Performing a Time cutout with params={params}")
+            log.debug(f"Performing a Time cutout with params={params}")
             params["TIME"] = time
 
         # "POL" filtering parameter
         if pol:
             if "POS" not in params:
                 raise ValueError("A positional cutout is also required when using 'POL'")
-            log.info(f"Performing a Polarization cutout with params={params}")
+            log.debug(f"Performing a Polarization cutout with params={params}")
             params["POL"] = pol
         #
         ###
@@ -671,9 +666,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 f.flush()
         print('\n')
 
-        log.info(f"SODA cutout saved to '{output_file}'")
-
-        return output_file
+        log.debug(f"SODA cutout saved to '{output_file}'")
 
 SRCNet = SRCNetClass()
 
