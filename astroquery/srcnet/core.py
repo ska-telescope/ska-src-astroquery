@@ -548,7 +548,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         """
 
         # Use the srcdev.skao.int datalink and add appropriate parameters
-        srcnet_datalink_service_url = conf.SRCNET_DATALINK_SERVICE_URL
+        srcnet_datalink_url = self.srcnet_datalink_service_url
 
         if sort is None:
             sort = "nearest_by_ip"
@@ -562,7 +562,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if client_ip_address:
             url_params["client_ip_address"] = client_ip_address
 
-        datalink_url = f"{srcnet_datalink_service_url}?{urlencode(url_params)}"
+        datalink_url = f"{srcnet_datalink_url}?{urlencode(url_params)}"
         log.debug(f"Using Datalink: {datalink_url}")
 
         datalink_xml = DatalinkResults.from_result_url(datalink_url, session=self.session)
