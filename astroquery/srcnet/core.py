@@ -548,8 +548,6 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         """
 
         # Use the srcdev.skao.int datalink and add appropriate parameters
-        srcnet_datalink_url = self.srcnet_datalink_service_url
-
         if sort is None:
             sort = "nearest_by_ip"
 
@@ -562,10 +560,10 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if client_ip_address:
             url_params["client_ip_address"] = client_ip_address
 
-        datalink_url = f"{srcnet_datalink_url}?{urlencode(url_params)}"
-        log.debug(f"Using Datalink: {datalink_url}")
+        datalink_request_url = f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
+        log.debug(f"Using Datalink: {datalink_request_url}")
 
-        datalink_xml = DatalinkResults.from_result_url(datalink_url, session=self.session)
+        datalink_xml = DatalinkResults.from_result_url(datalink_request_url, session=self.session)
 
         # Search for and extract the accessURL and ID from the Datalink XML
         for resource in datalink_xml.votable.resources:
