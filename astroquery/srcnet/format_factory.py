@@ -46,7 +46,7 @@ class SKAProduct:
         dec = metadata.get("s_dec")
         radius = metadata.get("s_fov")
 
-        if ra is None or dec or radius is None:
+        if ra is None or dec is None or radius is None:
             print("Error: s_ra/s_dec/s_fov not available in metadata")
             return
         try:
