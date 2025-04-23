@@ -517,7 +517,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
                 width=(width*u.deg).to('arcmin').value,
-                height=(width*u.deg).to('arcmin').value
+                height=(height*u.deg).to('arcmin').value
             )
         else:
             raise QueryRegionSearchAreaUndefined
