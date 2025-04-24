@@ -1,0 +1,9 @@
+pytest
+astropy
+pytest-astropy-header
+pytest-doctestplus
+pytest-remotedata
+qrcode
+requests
+pyvo
+keyring
