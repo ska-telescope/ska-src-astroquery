@@ -183,6 +183,23 @@ Use the SODA service to request a cutout of the specified dataset within a circu
     >>> INFO: Requesting SODA cutout from https://gatekeeper.srcdev.skao.int:443/soda/ska/datasets/soda with params={'ID': 'ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits', 'RESPONSEFORMAT': 'application/fits', 'POS': 'CIRCLE 351.986728 8.778684 0.1'} [astroquery.srcnet.core]
     >>> DEBUG: SODA cutout saved to 'output/soda-cutout-test.fits' [astroquery.srcnet.core]
 
+gaussian_convolution
+^^^^^^^^^^^
+
+Use the Gaussian convolution service to request a convolution with a specified sigma for a FITS image.
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import SRCNet
+    >>> srcnet = SRCNet(verbose=True)
+    >>> srcnet.gaussian_convolution(namespace="testing", name="PTF10tce.fits", sigma=2.5, output_file="output/gaussconv.2.5.fits")
+
+    >>> DEBUG: Using Datalink: https://datalink.ivoa.srcnet.skao.int/rucio/links?id=testing%PTF10tce.fits&must_include_gaussconv=True&sort=nearest_by_ip [astroquery.srcnet.core]
+    >>> DEBUG: Extracted Gaussian convolution Service: https://dev.gatekeeper.espsrc.iaa.csic.es/gaussconv_fitsimg/[astroquery.srcnet.core]
+    >>> DEBUG: Extracted ivo: ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits [astroquery.srcnet.core]
+    >>> INFO: Requesting Gaussian convolution from https://dev.gatekeeper.espsrc.iaa.csic.es/gaussconv_fitsimg/ with params={'ivo': 'ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits','sigma': '2.5'} [astroquery.srcnet.core]
+    >>> DEBUG: Gaussian convolution saved to 'output/gaussconv.2.5.fits' [astroquery.srcnet.core]
+
 
 Development
 -----------

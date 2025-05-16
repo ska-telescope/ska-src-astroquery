@@ -22,8 +22,8 @@ from urllib.parse import urlencode
 from . import conf
 
 from astroquery.srcnet.exceptions import (handle_exceptions,
-    NoAccessTokenFoundInResponse,QueryRegionSearchAreaAmbiguous,
-    QueryRegionSearchAreaUndefined, UnsupportedAccessProtocol, UnsupportedOIDCFlow)
+                                          NoAccessTokenFoundInResponse, QueryRegionSearchAreaAmbiguous,
+                                          QueryRegionSearchAreaUndefined, UnsupportedAccessProtocol, UnsupportedOIDCFlow)
 
 __all__ = ['SRCNet', 'SRCNetClass']  # specifies what to import
 
@@ -36,7 +36,8 @@ def exchange_token_for_service(service):
     def exchange_token(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            if self.access_token and self.refresh_token:                                                                #FIXME: Can exchange token rather than using refresh flow in v1.8.3
+            # FIXME: Can exchange token rather than using refresh flow in v1.8.3
+            if self.access_token and self.refresh_token:
                 audience = self._decode_access_token().get('aud')
                 if audience != service:
                     exchange_token_endpoint = \
@@ -113,7 +114,8 @@ def refresh_token_if_expired(func):
 
                     self._persist_tokens()
                 else:
-                    log.debug("Access token is valid, will not attempt token refresh.")
+                    log.debug(
+                        "Access token is valid, will not attempt token refresh.")
         else:
             log.debug("Either access token or refresh token are not set, will not "
                       "attempt token refresh.")
@@ -148,7 +150,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             with open(access_token_path, 'r') as f:
                 access_token = f.read()
         self._access_token = access_token
-        self._update_authorisation_requests_session()       # use this access token as the bearer token for requests
+        # use this access token as the bearer token for requests
+        self._update_authorisation_requests_session()
 
         # check for refresh tokens in constructor, environment then persisted file (in that order)
         if refresh_token:
@@ -212,7 +215,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # Payload is base64 encoded, let's decode it to plain string
         # To make sure decoding will always work. We're adding max padding ("==")
         # to payload - it will be ignored if not needed.
-        token_payload_decoded = str(base64.b64decode(token_payload + "=="), "utf-8")
+        token_payload_decoded = str(
+            base64.b64decode(token_payload + "=="), "utf-8")
 
         return json.loads(token_payload_decoded)
 
@@ -223,8 +227,10 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         :rtype: Dict
         """
 
-        login_endpoint = "{api_url}/login/device".format(api_url=self.srcnet_authn_api_address)
-        token_endpoint = "{api_url}/token?device_code={{device_code}}".format(api_url=self.srcnet_authn_api_address)
+        login_endpoint = "{api_url}/login/device".format(
+            api_url=self.srcnet_authn_api_address)
+        token_endpoint = "{api_url}/token?device_code={{device_code}}".format(
+            api_url=self.srcnet_authn_api_address)
 
         # redirect user to IAM
         device_authorization_response = self.session.get(login_endpoint)
@@ -237,7 +243,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             box_size=10,
             border=4,
         )
-        qr.add_data(device_authorization_response.json().get('verification_uri_complete'))
+        qr.add_data(device_authorization_response.json().get(
+            'verification_uri_complete'))
 
         # add instructional text for user if they don't want to use qr code
         user_instruction_text = ("Scan the QR code, or using a browser on another device, visit " +
@@ -284,7 +291,6 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             print()
             return {}
         print()
-
 
     def _persist_tokens(self):
         """ Save access and refresh tokens.
@@ -340,13 +346,15 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         position = 0
         rse = location_response[position].get('identifier')
         replicas = location_response[position].get('replicas')
-        associated_storage_area_id = location_response[position].get('associated_storage_area_id')
+        associated_storage_area_id = location_response[position].get(
+            'associated_storage_area_id')
 
         # pick a random replica from this site (only relevant if multiple exist)
         access_url = random.choice(replicas)
 
         # download the data
-        log.info("Downloading data from {rse} ({access_url})".format(rse=rse, access_url=access_url))
+        log.info("Downloading data from {rse} ({access_url})".format(
+            rse=rse, access_url=access_url))
         if access_url.startswith('https') or access_url.startswith('davs'):
             pass
         else:
@@ -367,7 +375,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         resp.raise_for_status()
         with open(name, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024):
-                print("{}KB downloaded".format(round(os.path.getsize(name) / 1024), 0), end='\r')
+                print("{}KB downloaded".format(
+                    round(os.path.getsize(name) / 1024), 0), end='\r')
                 f.write(chunk)
                 f.flush()
         print('\n')
@@ -489,7 +498,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 ra=parsed_coordinates.ra.deg,
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
-                radius=(radius*u.deg).to('arcmin').value
+                radius=(radius * u.deg).to('arcmin').value
             )
         elif width and height:
             query = """
@@ -516,8 +525,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 ra=parsed_coordinates.ra.deg,
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
-                width=(width*u.deg).to('arcmin').value,
-                height=(width*u.deg).to('arcmin').value
+                width=(width * u.deg).to('arcmin').value,
+                height=(width * u.deg).to('arcmin').value
             )
         else:
             raise QueryRegionSearchAreaUndefined
@@ -560,10 +569,12 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if client_ip_address:
             url_params["client_ip_address"] = client_ip_address
 
-        datalink_request_url = f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
+        datalink_request_url = f"{self.srcnet_datalink_service_url}?{
+            urlencode(url_params)}"
         log.debug(f"Using Datalink: {datalink_request_url}")
 
-        datalink_xml = DatalinkResults.from_result_url(datalink_request_url, session=self.session)
+        datalink_xml = DatalinkResults.from_result_url(
+            datalink_request_url, session=self.session)
 
         # Search for and extract the accessURL and ID from the Datalink XML
         for resource in datalink_xml.votable.resources:
@@ -584,9 +595,11 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 break
 
         if not soda_service:
-            raise ValueError("Error: SODA service accessURL not found in datalink response.")
+            raise ValueError(
+                "Error: SODA service accessURL not found in datalink response.")
         if not id_param:
-            raise ValueError("Error: Dataset ID not found in datalink response.")
+            raise ValueError(
+                "Error: Dataset ID not found in datalink response.")
 
         log.debug(f"Extracted SODA Service: {soda_service}")
         log.debug(f"Extracted ID: {id_param}")
@@ -596,8 +609,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         params["ID"] = id_param
         params["RESPONSEFORMAT"] = "application/fits"
 
-        ### Handle the SODA filtering parameters
-        ### https://www.ivoa.net/documents/SODA/20170517/REC-SODA-1.0.html#tth_sEc3.3
+        # Handle the SODA filtering parameters
+        # https://www.ivoa.net/documents/SODA/20170517/REC-SODA-1.0.html#tth_sEc3.3
         #
 
         # "POS" filering parameter
@@ -606,7 +619,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "CIRCLE" filtering parameter
         elif circle:
             if len(circle) != 3:
-               raise ValueError(f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
+                raise ValueError(
+                    f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
             longitude, latitude, radius = circle
             params["POS"] = f"CIRCLE {longitude} {latitude} {radius}"
         # "POLYGON" filtering parameter
@@ -619,9 +633,11 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "RANGE" filtering parameter
         elif range_:
             if len(range_) != 4:
-                raise ValueError(f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
+                raise ValueError(
+                    f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
             longitude1, longitude2, latitude1, latitude2 = range_
-            params["POS"] = f"RANGE {longitude1} {longitude2} {latitude1} {latitude2}"
+            params["POS"] = f"RANGE {longitude1} {
+                longitude2} {latitude1} {latitude2}"
         else:
             log.warning(f"No positional region cutout set.")
             pass
@@ -629,28 +645,32 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "BAND" filtering parameter
         if band:
             if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'BAND'")
+                raise ValueError(
+                    "A positional cutout is also required when using 'BAND'")
             log.debug(f"Performing a Band cutout with params={params}")
             params["BAND"] = band
 
         # "TIME" filtering parameter
         if time:
             if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'TIME'")
+                raise ValueError(
+                    "A positional cutout is also required when using 'TIME'")
             log.debug(f"Performing a Time cutout with params={params}")
             params["TIME"] = time
 
         # "POL" filtering parameter
         if pol:
             if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'POL'")
+                raise ValueError(
+                    "A positional cutout is also required when using 'POL'")
             log.debug(f"Performing a Polarization cutout with params={params}")
             params["POL"] = pol
         #
         ###
 
         # Make the request to SODA
-        log.info(f"Requesting SODA cutout from {soda_service} with params={params}")
+        log.info(f"Requesting SODA cutout from {
+                 soda_service} with params={params}")
         response = self.session.get(soda_service, params=params, stream=True)
         response.raise_for_status()
 
@@ -666,5 +686,127 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         log.debug(f"SODA cutout saved to '{output_file}'")
 
-SRCNet = SRCNetClass()
+    @handle_exceptions
+    def gaussian_convolution(self, namespace, name, output_file, sort=None,
+                             client_ip_address=None, sigma=1.0):
+        """ Perform Gaussian convolution over a FITS image
 
+        :param str namespace: The scope where the data is stored, e.g. testing.
+        :param str name: Filename, e.g. test-image-1arcmin.fits.
+        :param str output_file: Path and filename of the resulting convoluted
+            FITS file, e.g. output/output_file.fits.
+        :param str sort: (Optional) Specify how the Datalink searches for the
+            Gaussian convolution service; 'nearest_by_ip' (default) or'random'.
+        :param str client_ip_address: (Optional) Specify the
+            Gaussian Convolution service IP address. Overrides 'sort'.
+        :param float sigma: (Optional) Standard deviation (sigma) of the
+            Gaussian kernel used to convolve the FITS image. Higher values
+            produce stronger blurring. Default is 1.0.
+
+        :return: The query response.
+        :rtype: FITS file
+        """
+
+        # # Use the srcdev.skao.int datalink and add appropriate parameters
+        # if sort is None:
+        #     sort = "nearest_by_ip"
+
+        # url_params = {
+        #     "id": f"{namespace}:{name}",
+        #     "sort": sort,
+        #     "must_include_gaussconv": True  # IN CAPACITY??????
+        # }
+
+        # if client_ip_address:
+        #     url_params["client_ip_address"] = client_ip_address
+
+        # datalink_request_url = (
+        #     f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
+        # )
+        # log.debug(f"Using Datalink: {datalink_request_url}")
+
+        # datalink_xml = DatalinkResults.from_result_url(datalink_request_url,
+        #                                                session=self.session)
+
+        # resources = datalink_xml.votable.resources
+
+        # # Search for and extract the accessURL and ID from the Datalink XML
+        # gaussconv_service = None
+        # id_param = None
+        # index = 0
+
+        # while index < len(resources) and not gaussconv_service:
+        #     resource = resources[index]
+        #     if resource.type == "meta":
+
+        #         # Find service url
+        #         gaussconv_service = next((
+        #             param.value
+        #             for param in resource.params
+        #             if param.name == "accessURL"), None)
+
+        #         # Find service params
+        #         if resource.groups:
+
+        #             group_index = 0
+        #             len_groups = len(resource.groups)
+        #             while group_index < len_groups and id_param is None:
+        #                 group = resource.groups[group_index]
+
+        #                 id_param = next((
+        #                     entry.value
+        #                     for entry in group.entries
+        #                     if entry.name == "ID"), None)
+
+        #                 group_index += 1
+
+        #     index += 1
+
+        gaussconv_service = "https://dev.gatekeeper.espsrc.iaa.csic.es/gaussconv_fitsimg/"
+        id_param = "ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits"
+
+        # Validate that we found the required parameters
+        if not gaussconv_service:
+            raise ValueError(
+                "Error: service accessURL not found in datalink response.")
+        if not id_param:
+            raise ValueError(
+                "Error: Dataset ID not found in datalink response.")
+
+        log.debug(f"Extracted Gaussian Convolution Service: {
+                  gaussconv_service}")
+        log.debug(f"Extracted ID: {id_param}")
+
+        # Initialise the 'params' dictionary
+        params = {}
+        params["ivo"] = id_param
+        params["sigma"] = sigma
+
+        # Make the request to Gaussian Convolution
+        log.info(f"Requesting Gaussian convolution from {
+                 gaussconv_service} with params={params}")
+        response = self.session.post(gaussconv_service, json=params,
+                                     stream=True)
+        print(f"STATUS CODE: {response.status_code}")
+
+        if response.status_code == 200:
+            # Write the Gauss convolution response as an output file
+            os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+
+            try:
+                with open(output_file, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=4096):
+                        if chunk:
+                            f.write(chunk)
+            except (OSError, IOError) as file_error:
+                print(f"File error: {file_error}")
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+
+            log.debug(f"Gaussian Convolution saved to '{output_file}'")
+
+        else:
+            print(f"❌ Error: {response.json()}")
+
+
+SRCNet = SRCNetClass()
