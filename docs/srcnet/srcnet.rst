@@ -183,6 +183,65 @@ Use the SODA service to request a cutout of the specified dataset within a circu
     >>> INFO: Requesting SODA cutout from https://gatekeeper.srcdev.skao.int:443/soda/ska/datasets/soda with params={'ID': 'ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits', 'RESPONSEFORMAT': 'application/fits', 'POS': 'CIRCLE 351.986728 8.778684 0.1'} [astroquery.srcnet.core]
     >>> DEBUG: SODA cutout saved to 'output/soda-cutout-test.fits' [astroquery.srcnet.core]
 
+Format Factory
+^^^^^^^^^^^^^^
+
+Use the preliminary Format Factory to automatically detect a dataset's type using its Rucio `Obscore metadata <https://gitlab.com/ska-telescope/src/src-mm/ska-src-mm-rucio-ivoa-integrations/-/blob/main/postgres-metadata/etc/init/dachs/02-rucio.sql?ref_type=heads#L12>`_, and access format-specific methods such as listing metadata and performing SODA cutouts (Renamed as ``subcube`` for 3D image cubes and ``cutout`` for 2D images).
+
+Note: The dataset must have its Rucio metadata key ``dataproduct_type`` set correctly (e.g. ``cube``, ``image``, ``spectra``, or ``visibility``).
+
+To use the Format Factory, import the ``SKAFormatFactory`` class.
+
+If you wish to list the available methods for a specific data type before loading a dataset (e.g., ``Cube().show_methods()``), you must also explicitly import the corresponding data type class (Cube, Image, Spectra, or Visibility) first.
+This is optional -- if you load a dataset using ``SKAFormatFactory.get(...)``, the correct class is instantiated automatically.
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import SRCNet, SKAFormatFactory, Cube, Image, Spectra, Visibility
+
+    >>> Image().show_methods()
+
+    Available methods for Image:
+    - cutout
+    - show_metadata
+    - fits_header_info (placeholder)
+
+    >>> SRCNet.login()
+
+    Successfully polled for token. You are now logged in.
+
+    >>> data = SKAFormatFactory.get("magenta", "HD163296_13CO_2-1.fits")
+
+    INFO: Exchanged authn-api service token for data-management-api service [astroquery.srcnet.core]
+    Detected data type of magenta:HD163296_13CO_2-1.fits: cube
+
+    >>> data.show_methods()
+
+    Available methods for Cube:
+    - subcube
+    - show_metadata
+    - fits_header_info (placeholder)
+
+    >>> data.show_metadata()
+
+    Metadata for magenta:HD163296_13CO_2-1.fits
+    s_ra                : 269.08
+    test                : 2
+    s_dec               : -21.95
+    s_fov               : 0.1
+    obs_id              : magenta:HD163296_13CO_2-1.fits
+    testing             : {"key1": {"level2": "value2"}}
+    access_url          : https://ivoa.datalink.srcdev.skao.int/rucio/links?id=magenta:HD163296_13CO_2-1.fits
+    access_format       : application/x-votable+xml
+    facility_name       : ALMA
+    obs_collection      : collection_magenta_test
+    dataproduct_type    : cube
+    obs_publisher_did   : magenta
+
+    >>> data.subcube(circle=(269.08, -21.95, 0.01),output_file="output.fits")
+
+    INFO: Requesting SODA cutout from https://gatekeeper.srcdev.skao.int:443/soda/ska/datasets/soda with params={'ID': 'ivo://auth.example.org/datasets/fits?magenta/33/7b/HD163296_13CO_2-1.fits', 'RESPONSEFORMAT': 'application/fits', 'POS': 'CIRCLE 269.08 -21.95 0.01'} [astroquery.srcnet.core]
+
 
 Development
 -----------

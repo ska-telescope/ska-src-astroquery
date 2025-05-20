@@ -666,5 +666,17 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         log.debug(f"SODA cutout saved to '{output_file}'")
 
+    @handle_exceptions
+    @exchange_token_for_service('data-management-api')
+    @refresh_token_if_expired
+    def get_metadata(self, namespace, name):
+        """
+        Get metadata for a given data identifier from the Data Management API.
+        """
+        metadata_url = f"{self.srcnet_dm_api_base_address}/metadata/{namespace}/{name}?plugin=POSTGRES_JSON"
+        resp = self.session.get(metadata_url)
+        resp.raise_for_status()
+        return resp.json()
+
 SRCNet = SRCNetClass()
 

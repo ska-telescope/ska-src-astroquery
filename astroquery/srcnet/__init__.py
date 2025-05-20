@@ -37,5 +37,6 @@ class Conf(_config.ConfigNamespace):
 conf = Conf()
 
 from .core import SRCNet, SRCNetClass
+from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
 
-__all__ = ['SRCNet', 'SRCNetClass', 'conf']
+__all__ = ['SRCNet', 'SRCNetClass', 'conf', 'SKAFormatFactory', 'Cube', 'Image', 'Spectra', 'Visibility']
