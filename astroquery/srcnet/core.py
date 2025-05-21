@@ -569,8 +569,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         if client_ip_address:
             url_params["client_ip_address"] = client_ip_address
 
-        datalink_request_url = f"{self.srcnet_datalink_service_url}?{
-            urlencode(url_params)}"
+        datalink_request_url = f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
         log.debug(f"Using Datalink: {datalink_request_url}")
 
         datalink_xml = DatalinkResults.from_result_url(
@@ -595,11 +594,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 break
 
         if not soda_service:
-            raise ValueError(
-                "Error: SODA service accessURL not found in datalink response.")
+            raise ValueError("Error: SODA service accessURL not found in datalink response.")
         if not id_param:
-            raise ValueError(
-                "Error: Dataset ID not found in datalink response.")
+            raise ValueError("Error: Dataset ID not found in datalink response.")
 
         log.debug(f"Extracted SODA Service: {soda_service}")
         log.debug(f"Extracted ID: {id_param}")
@@ -633,11 +630,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "RANGE" filtering parameter
         elif range_:
             if len(range_) != 4:
-                raise ValueError(
-                    f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
+                raise ValueError(f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
             longitude1, longitude2, latitude1, latitude2 = range_
-            params["POS"] = f"RANGE {longitude1} {
-                longitude2} {latitude1} {latitude2}"
+            params["POS"] = f"RANGE {longitude1} {longitude2} {latitude1} {latitude2}"
         else:
             log.warning(f"No positional region cutout set.")
             pass
@@ -645,32 +640,28 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "BAND" filtering parameter
         if band:
             if "POS" not in params:
-                raise ValueError(
-                    "A positional cutout is also required when using 'BAND'")
+                raise ValueError("A positional cutout is also required when using 'BAND'")
             log.debug(f"Performing a Band cutout with params={params}")
             params["BAND"] = band
 
         # "TIME" filtering parameter
         if time:
             if "POS" not in params:
-                raise ValueError(
-                    "A positional cutout is also required when using 'TIME'")
+                raise ValueError("A positional cutout is also required when using 'TIME'")
             log.debug(f"Performing a Time cutout with params={params}")
             params["TIME"] = time
 
         # "POL" filtering parameter
         if pol:
             if "POS" not in params:
-                raise ValueError(
-                    "A positional cutout is also required when using 'POL'")
+                raise ValueError("A positional cutout is also required when using 'POL'")
             log.debug(f"Performing a Polarization cutout with params={params}")
             params["POL"] = pol
         #
         ###
 
         # Make the request to SODA
-        log.info(f"Requesting SODA cutout from {
-                 soda_service} with params={params}")
+        log.info(f"Requesting SODA cutout from {soda_service} with params={params}")
         response = self.session.get(soda_service, params=params, stream=True)
         response.raise_for_status()
 
@@ -767,14 +758,11 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         # Validate that we found the required parameters
         if not gaussconv_service:
-            raise ValueError(
-                "Error: service accessURL not found in datalink response.")
+            raise ValueError("Error: service accessURL not found in datalink response.")
         if not id_param:
-            raise ValueError(
-                "Error: Dataset ID not found in datalink response.")
+            raise ValueError("Error: Dataset ID not found in datalink response.")
 
-        log.debug(f"Extracted Gaussian Convolution Service: {
-                  gaussconv_service}")
+        log.debug(f"Extracted Gaussian Convolution Service: {gaussconv_service}")
         log.debug(f"Extracted ID: {id_param}")
 
         # Initialise the 'params' dictionary
@@ -783,10 +771,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         params["sigma"] = sigma
 
         # Make the request to Gaussian Convolution
-        log.info(f"Requesting Gaussian convolution from {
-                 gaussconv_service} with params={params}")
-        response = self.session.post(gaussconv_service, json=params,
-                                     stream=True)
+        log.info(f"Requesting Gaussian convolution from {gaussconv_service} with params={params}")
+        response = self.session.post(gaussconv_service, json=params, stream=True)
         print(f"STATUS CODE: {response.status_code}")
 
         if response.status_code == 200:
