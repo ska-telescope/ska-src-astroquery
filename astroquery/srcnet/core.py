@@ -525,8 +525,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 ra=parsed_coordinates.ra.deg,
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
-                width=(width * u.deg).to('arcmin').value,
-                height=(width * u.deg).to('arcmin').value
+                width=(width*u.deg).to('arcmin').value,
+                height=(height*u.deg).to('arcmin').value
             )
         else:
             raise QueryRegionSearchAreaUndefined
@@ -678,9 +678,18 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         log.debug(f"SODA cutout saved to '{output_file}'")
 
     @handle_exceptions
-    def gaussian_convolution(self, namespace, name, output_file, sort=None,
-                             client_ip_address=None, sigma=1.0):
-        """ Perform Gaussian convolution over a FITS image
+    @exchange_token_for_service('data-management-api')
+    @refresh_token_if_expired
+    def get_metadata(self, namespace, name):
+        """
+        Get metadata for a given data identifier from the Data Management API.
+        """
+        metadata_url = f"{self.srcnet_dm_api_base_address}/metadata/{namespace}/{name}?plugin=POSTGRES_JSON"
+        resp = self.session.get(metadata_url)
+        resp.raise_for_status()
+        return resp.json()
+
+SRCNet = SRCNetClass()
 
         :param str namespace: The scope where the data is stored, e.g. testing.
         :param str name: Filename, e.g. test-image-1arcmin.fits.
