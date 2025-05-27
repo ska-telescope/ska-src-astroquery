@@ -677,19 +677,11 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         log.debug(f"SODA cutout saved to '{output_file}'")
 
-    @handle_exceptions
-    @exchange_token_for_service('data-management-api')
-    @refresh_token_if_expired
-    def get_metadata(self, namespace, name):
-        """
-        Get metadata for a given data identifier from the Data Management API.
-        """
-        metadata_url = f"{self.srcnet_dm_api_base_address}/metadata/{namespace}/{name}?plugin=POSTGRES_JSON"
-        resp = self.session.get(metadata_url)
-        resp.raise_for_status()
-        return resp.json()
 
-SRCNet = SRCNetClass()
+    @handle_exceptions
+    def gaussian_convolution(self, namespace, name, output_file, sort=None,
+                             client_ip_address=None, sigma=1.0):
+        """ Perform Gaussian convolution over a FITS image
 
         :param str namespace: The scope where the data is stored, e.g. testing.
         :param str name: Filename, e.g. test-image-1arcmin.fits.
@@ -764,14 +756,18 @@ SRCNet = SRCNetClass()
 
         gaussconv_service = "https://dev.gatekeeper.espsrc.iaa.csic.es/gaussconv_fitsimg/"
         id_param = "ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits"
+        # id_param = "ivo://auth.example.org/datasets/fits?chocolate/80/b5/pi24_run_1_cleaned.fits"
 
         # Validate that we found the required parameters
         if not gaussconv_service:
-            raise ValueError("Error: service accessURL not found in datalink response.")
+            raise ValueError(
+                "Error: service accessURL not found in datalink response.")
         if not id_param:
-            raise ValueError("Error: Dataset ID not found in datalink response.")
+            raise ValueError(
+                "Error: Dataset ID not found in datalink response.")
 
-        log.debug(f"Extracted Gaussian Convolution Service: {gaussconv_service}")
+        log.debug(f"Extracted Gaussian Convolution Service: {
+                  gaussconv_service}")
         log.debug(f"Extracted ID: {id_param}")
 
         # Initialise the 'params' dictionary
@@ -780,8 +776,10 @@ SRCNet = SRCNetClass()
         params["sigma"] = sigma
 
         # Make the request to Gaussian Convolution
-        log.info(f"Requesting Gaussian convolution from {gaussconv_service} with params={params}")
-        response = self.session.post(gaussconv_service, json=params, stream=True)
+        log.info(f"Requesting Gaussian convolution from {
+                 gaussconv_service} with params={params}")
+        response = self.session.post(gaussconv_service, json=params,
+                                     stream=True)
         print(f"STATUS CODE: {response.status_code}")
 
         if response.status_code == 200:
@@ -804,4 +802,17 @@ SRCNet = SRCNetClass()
             print(f"❌ Error: {response.json()}")
 
 
+    @handle_exceptions
+    @exchange_token_for_service('data-management-api')
+    @refresh_token_if_expired
+    def get_metadata(self, namespace, name):
+        """
+        Get metadata for a given data identifier from the Data Management API.
+        """
+        metadata_url = f"{self.srcnet_dm_api_base_address}/metadata/{namespace}/{name}?plugin=POSTGRES_JSON"
+        resp = self.session.get(metadata_url)
+        resp.raise_for_status()
+        return resp.json()
+
 SRCNet = SRCNetClass()
+
