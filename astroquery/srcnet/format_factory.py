@@ -22,6 +22,9 @@ class SKAProduct:
     def cutout(self, *args, **kwargs):
         raise NotImplementedError("Not implemented in SKAProduct base class.")
 
+    def gaussconv(self, *args, **kwargs):
+        raise NotImplementedError("Not implemented in SKAProduct base class.")    
+
     def subcube(self, *args, **kwargs):
         raise NotImplementedError("Not implemented in SKAProduct base class.")
 
@@ -54,6 +57,16 @@ class Image(SKAProduct):
             output_file=output_file,
             **kwargs
         )
+
+    
+    def gaussconv(self, sigma=1.0, output_file=None, **kwargs):
+        return SRCNet.soda_cutout(
+            namespace=self.namespace,
+            name=self.name,
+            sigma=sigma,
+            output_file=output_file,
+            **kwargs
+        )    
 
 class Cube(SKAProduct):
 
