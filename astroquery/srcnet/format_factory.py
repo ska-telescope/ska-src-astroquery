@@ -60,7 +60,7 @@ class Image(SKAProduct):
 
     
     def gaussconv(self, sigma=1.0, output_file=None, **kwargs):
-        return SRCNet.soda_cutout(
+        return SRCNet.gaussian_convolution(
             namespace=self.namespace,
             name=self.name,
             sigma=sigma,
