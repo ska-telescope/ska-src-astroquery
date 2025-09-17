@@ -699,64 +699,61 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         :rtype: FITS file
         """
 
-        # # Use the srcdev.skao.int datalink and add appropriate parameters
-        # if sort is None:
-        #     sort = "nearest_by_ip"
+        # Use the srcdev.skao.int datalink and add appropriate parameters
+        if sort is None:
+            sort = "nearest_by_ip"
 
-        # url_params = {
-        #     "id": f"{namespace}:{name}",
-        #     "sort": sort,
-        #     "must_include_gaussconv": True  # IN CAPACITY??????
-        # }
+        url_params = {
+            "id": f"{namespace}:{name}",
+            "sort": sort,
+            "str_services": "gaussconv"  
+        }
 
-        # if client_ip_address:
-        #     url_params["client_ip_address"] = client_ip_address
+        if client_ip_address:
+            url_params["client_ip_address"] = client_ip_address
 
-        # datalink_request_url = (
-        #     f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
-        # )
-        # log.debug(f"Using Datalink: {datalink_request_url}")
+        datalink_request_url = (
+            f"{self.srcnet_datalink_service_url}?"
+            f"{urlencode(url_params, safe=':')}"
+        )
+        log.debug(f"Using Datalink: {datalink_request_url}")
 
-        # datalink_xml = DatalinkResults.from_result_url(datalink_request_url,
-        #                                                session=self.session)
+        datalink_xml = DatalinkResults.from_result_url(datalink_request_url,
+                                                       session=self.session)
 
-        # resources = datalink_xml.votable.resources
+        resources = datalink_xml.votable.resources
 
-        # # Search for and extract the accessURL and ID from the Datalink XML
-        # gaussconv_service = None
-        # id_param = None
-        # index = 0
+        # Search for and extract the accessURL and ID from the Datalink XML
+        gaussconv_service = None
+        id_param = None
+        index = 0
 
-        # while index < len(resources) and not gaussconv_service:
-        #     resource = resources[index]
-        #     if resource.type == "meta":
+        while index < len(resources) and not gaussconv_service:
+            resource = resources[index]
+            if resource.type == "meta":
 
-        #         # Find service url
-        #         gaussconv_service = next((
-        #             param.value
-        #             for param in resource.params
-        #             if param.name == "accessURL"), None)
+                # Find service url
+                gaussconv_service = next((
+                    param.value
+                    for param in resource.params
+                    if param.name == "accessURL"), None)
 
-        #         # Find service params
-        #         if resource.groups:
+                # Find service params
+                if resource.groups:
 
-        #             group_index = 0
-        #             len_groups = len(resource.groups)
-        #             while group_index < len_groups and id_param is None:
-        #                 group = resource.groups[group_index]
+                    group_index = 0
+                    len_groups = len(resource.groups)
+                    while group_index < len_groups and id_param is None:
+                        group = resource.groups[group_index]
 
-        #                 id_param = next((
-        #                     entry.value
-        #                     for entry in group.entries
-        #                     if entry.name == "ID"), None)
+                        id_param = next((
+                            entry.value
+                            for entry in group.entries
+                            if entry.name == "ID"), None)
 
-        #                 group_index += 1
+                        group_index += 1
 
-        #     index += 1
-
-        gaussconv_service = "https://dev.gatekeeper.espsrc.iaa.csic.es/gaussconv_fitsimg/"
-        id_param = "ivo://auth.example.org/datasets/fits?testing/5b/f5/PTF10tce.fits"
-        # id_param = "ivo://auth.example.org/datasets/fits?chocolate/80/b5/pi24_run_1_cleaned.fits"
+            index += 1
 
         # Validate that we found the required parameters
         if not gaussconv_service:
