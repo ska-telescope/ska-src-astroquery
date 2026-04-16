@@ -158,8 +158,8 @@ def test_get_data_success(mock_srcnet):
 
     with patch.object(mock_srcnet.session, "get", side_effect=[
         mock_service_token_response,
-        mock_locate_response,     
-        mock_token_response 
+        mock_locate_response,
+        mock_token_response
     ]), \
     patch("astroquery.srcnet.core.requests.get", return_value=mock_download_response), \
     patch("astroquery.srcnet.core.random.choice", return_value="https://mock-url.com/file.fits"), \
@@ -479,4 +479,93 @@ def test_cutout_range_with_invalid_range(mock_srcnet_soda, caplog):
                 output_file=str(output_file),
                 range_=(351.974, 351.998, 8.768)
             )
+
+
+def test_tap_sync_success(mock_srcnet):
+    mock_response = MagicMock()
+    mock_response.text = "<VOTable>mock result</VOTable>"
+
+    with patch.object(mock_srcnet.session, "get", return_value=mock_response) as mock_get:
+        result = mock_srcnet.get_software_metadata_tap_sync("SELECT * FROM sdm.software")
+
+        assert result == "<VOTable>mock result</VOTable>"
+        mock_get.assert_called_once()
+        call_args = mock_get.call_args
+        assert call_args.kwargs["params"]["LANG"] == "ADQL"
+        assert call_args.kwargs["params"]["QUERY"] == "SELECT * FROM sdm.software"
+
+
+def test_tap_async_success(mock_srcnet):
+    uws_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0">
+        <uws:jobId>job-123</uws:jobId>
+    </uws:job>"""
+
+    mock_post_submit = MagicMock()
+    mock_post_submit.text = uws_xml
+    mock_post_submit.raise_for_status = MagicMock()
+
+    mock_post_phase = MagicMock()
+    mock_post_phase.raise_for_status = MagicMock()
+
+    with patch.object(mock_srcnet.session, "post", side_effect=[mock_post_submit, mock_post_phase]):
+        result = mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
+
+    assert result == {"job_id": "job-123"}
+
+
+def test_tap_async_invalid_xml(mock_srcnet):
+    mock_resp = MagicMock()
+    mock_resp.text = "not xml at all"
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch.object(mock_srcnet.session, "post", return_value=mock_resp):
+        with pytest.raises(Exception):
+            mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
+
+
+def test_tap_async_missing_job_id(mock_srcnet):
+    uws_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0">
+    </uws:job>"""
+
+    mock_resp = MagicMock()
+    mock_resp.text = uws_xml
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch.object(mock_srcnet.session, "post", return_value=mock_resp):
+        with pytest.raises(Exception):
+            mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
+
+
+def test_job_status_completed(mock_srcnet):
+    mock_phase_resp = MagicMock()
+    mock_phase_resp.text = "COMPLETED"
+    mock_phase_resp.raise_for_status = MagicMock()
+
+    mock_result_resp = MagicMock()
+    mock_result_resp.text = "<VOTable>results here</VOTable>"
+    mock_result_resp.raise_for_status = MagicMock()
+
+    with patch.object(mock_srcnet.session, "get", side_effect=[mock_phase_resp, mock_result_resp]):
+        result = mock_srcnet.get_software_discovery_async_job_status("job-123")
+
+    assert result["status"] == "COMPLETED"
+    assert result["result"] == "<VOTable>results here</VOTable>"
+
+
+def test_job_status_error(mock_srcnet):
+    mock_phase_resp = MagicMock()
+    mock_phase_resp.text = "ERROR"
+    mock_phase_resp.raise_for_status = MagicMock()
+
+    mock_error_resp = MagicMock()
+    mock_error_resp.text = "Something went wrong on the server"
+
+    with patch.object(mock_srcnet.session, "get", side_effect=[mock_phase_resp, mock_error_resp]):
+        result = mock_srcnet.get_software_discovery_async_job_status("job-123")
+
+    assert result["status"] == "ERROR"
+    assert result["job_id"] == "job-123"
+    assert "Something went wrong" in result["error"]
 

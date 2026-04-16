@@ -712,7 +712,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # --- Submit job ---
         resp = self.session.post(
             tap_endpoint,
-            data={"REQUEST": "doQuery", "LANG": "ADQL", "QUERY": query},
+            data={"LANG": "ADQL", "QUERY": query},
             timeout=10,
         )
         resp.raise_for_status()
