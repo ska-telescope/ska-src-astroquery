@@ -84,6 +84,16 @@ def test_create_tap_query_async(mock_srcnet):
             language="ADQL"
         )
 
+def test_create_tap_query_custom_baseurl(mock_srcnet):
+    with patch("astroquery.srcnet.core.pyvo.dal.TAPQuery") as mock_tap:
+        mock_srcnet._create_tap_query("SELECT * FROM sdm.software", sync=True, baseurl="https://custom-tap.example.com")
+        mock_tap.assert_called_once_with(
+            baseurl="https://custom-tap.example.com",
+            query="SELECT * FROM sdm.software",
+            mode="sync",
+            language="ADQL"
+        )
+
 def test_decode_access_token_custom():
     payload = '{"sub":"123456","preferred_username":"test","organisation_name":"SKA IAM Prototype"}'
     encoded_payload = base64.b64encode(payload.encode("utf-8")).decode("utf-8").rstrip("=")
@@ -481,91 +491,40 @@ def test_cutout_range_with_invalid_range(mock_srcnet_soda, caplog):
             )
 
 
-def test_tap_sync_success(mock_srcnet):
-    mock_response = MagicMock()
-    mock_response.text = "<VOTable>mock result</VOTable>"
+def test_software_metadata_tap_sync_success(mock_srcnet):
+    mock_service = MagicMock()
+    mock_result = MagicMock()
+    mock_service.run_sync.return_value = mock_result
 
-    with patch.object(mock_srcnet.session, "get", return_value=mock_response) as mock_get:
-        result = mock_srcnet.get_software_metadata_tap_sync("SELECT * FROM sdm.software")
+    with patch("astroquery.srcnet.core.TAPService", return_value=mock_service):
+        result = mock_srcnet.get_software_metadata_tap("SELECT * FROM sdm.software", sync=True)
 
-        assert result == "<VOTable>mock result</VOTable>"
-        mock_get.assert_called_once()
-        call_args = mock_get.call_args
-        assert call_args.kwargs["params"]["LANG"] == "ADQL"
-        assert call_args.kwargs["params"]["QUERY"] == "SELECT * FROM sdm.software"
+    mock_service.run_sync.assert_called_once_with("SELECT * FROM sdm.software")
+    assert result == mock_result
 
 
-def test_tap_async_success(mock_srcnet):
-    uws_xml = """<?xml version="1.0" encoding="UTF-8"?>
-    <uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0">
-        <uws:jobId>job-123</uws:jobId>
-    </uws:job>"""
+def test_software_metadata_tap_async_success(mock_srcnet):
+    mock_service = MagicMock()
+    mock_job = MagicMock()
+    mock_job.job_id = "job-123"
+    mock_service.submit_job.return_value = mock_job
 
-    mock_post_submit = MagicMock()
-    mock_post_submit.text = uws_xml
-    mock_post_submit.raise_for_status = MagicMock()
+    with patch("astroquery.srcnet.core.TAPService", return_value=mock_service):
+        result = mock_srcnet.get_software_metadata_tap("SELECT * FROM sdm.software", sync=False)
 
-    mock_post_phase = MagicMock()
-    mock_post_phase.raise_for_status = MagicMock()
-
-    with patch.object(mock_srcnet.session, "post", side_effect=[mock_post_submit, mock_post_phase]):
-        result = mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
-
-    assert result == {"job_id": "job-123"}
+    mock_service.submit_job.assert_called_once_with("SELECT * FROM sdm.software")
+    mock_job.run.assert_called_once()
+    assert result.job_id == "job-123"
 
 
-def test_tap_async_invalid_xml(mock_srcnet):
-    mock_resp = MagicMock()
-    mock_resp.text = "not xml at all"
-    mock_resp.raise_for_status = MagicMock()
+def test_job_status_returns_fetch_result(mock_srcnet):
+    mock_job = MagicMock()
+    mock_fetch_result = MagicMock()
+    mock_job.fetch_result.return_value = mock_fetch_result
 
-    with patch.object(mock_srcnet.session, "post", return_value=mock_resp):
-        with pytest.raises(Exception):
-            mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
-
-
-def test_tap_async_missing_job_id(mock_srcnet):
-    uws_xml = """<?xml version="1.0" encoding="UTF-8"?>
-    <uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0">
-    </uws:job>"""
-
-    mock_resp = MagicMock()
-    mock_resp.text = uws_xml
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch.object(mock_srcnet.session, "post", return_value=mock_resp):
-        with pytest.raises(Exception):
-            mock_srcnet.get_software_metadata_tap_async("SELECT * FROM sdm.software")
-
-
-def test_job_status_completed(mock_srcnet):
-    mock_phase_resp = MagicMock()
-    mock_phase_resp.text = "COMPLETED"
-    mock_phase_resp.raise_for_status = MagicMock()
-
-    mock_result_resp = MagicMock()
-    mock_result_resp.text = "<VOTable>results here</VOTable>"
-    mock_result_resp.raise_for_status = MagicMock()
-
-    with patch.object(mock_srcnet.session, "get", side_effect=[mock_phase_resp, mock_result_resp]):
+    with patch("astroquery.srcnet.core.pyvo.dal.AsyncTAPJob", return_value=mock_job):
         result = mock_srcnet.get_software_discovery_async_job_status("job-123")
 
-    assert result["status"] == "COMPLETED"
-    assert result["result"] == "<VOTable>results here</VOTable>"
-
-
-def test_job_status_error(mock_srcnet):
-    mock_phase_resp = MagicMock()
-    mock_phase_resp.text = "ERROR"
-    mock_phase_resp.raise_for_status = MagicMock()
-
-    mock_error_resp = MagicMock()
-    mock_error_resp.text = "Something went wrong on the server"
-
-    with patch.object(mock_srcnet.session, "get", side_effect=[mock_phase_resp, mock_error_resp]):
-        result = mock_srcnet.get_software_discovery_async_job_status("job-123")
-
-    assert result["status"] == "ERROR"
-    assert result["job_id"] == "job-123"
-    assert "Something went wrong" in result["error"]
+    mock_job.fetch_result.assert_called_once()
+    assert result == mock_fetch_result
 

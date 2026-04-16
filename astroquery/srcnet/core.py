@@ -4,7 +4,6 @@ import os
 import random
 import textwrap
 import time
-import xml.etree.ElementTree as ElementT
 from functools import wraps
 from urllib.parse import urlencode
 
@@ -14,6 +13,7 @@ import requests
 from astropy import log
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from pyvo.dal import TAPService
 from pyvo.dal.adhoc import DatalinkResults
 
 from astroquery.query import BaseQuery, BaseVOQuery
@@ -187,17 +187,18 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     def refresh_token(self, new_refresh_token):
         self._refresh_token = new_refresh_token
 
-    def _create_tap_query(self, query, sync):
+    def _create_tap_query(self, query, sync, baseurl=None):
         """ Constructs a TAP query but doesn't execute/submit it."
 
         :param str query: An ADQL query.
         :param bool sync: Run in synchronous mode?
+        :param str baseurl: Optional TAP service base URL. Defaults to srcnet_tap_service_url_base.
 
         :return: The query.
         :rtype: pyvo.dal.TAPQuery
         """
         query = pyvo.dal.TAPQuery(
-            baseurl=self.srcnet_tap_service_url_base,
+            baseurl=baseurl or self.srcnet_tap_service_url_base,
             query=query,
             mode='sync' if sync else 'async',
             language='ADQL'
@@ -683,98 +684,42 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         return resp.json()
 
     @handle_exceptions
-    def get_software_metadata_tap_sync(self, query):
-        """Tap sync query for software discovery.
+    def get_software_metadata_tap(self, query, sync=True):
+        """Run a TAP query for software discovery, either synchronously or asynchronously.
+
+        Uses pyvo's TAPService for full IVOA TAP protocol support including
+        sync queries, async job submission, polling, and result fetching.
 
         :param str query: ADQL query string, e.g. "SELECT * FROM sdm.software"
-        :return: HTTP response from TAP endpoint
-        :rtype: requests.Response
+        :param bool sync: Run in synchronous mode? Defaults to True.
+
+        :return: TAPResults (sync) or AsyncTAPJob (async).
+        :rtype: pyvo.dal.TAPResults or pyvo.dal.AsyncTAPJob
         """
-        tap_endpoint = f"{self.srcnet_mm_software_discovery_tap_url}/sync"
-        params = {
-            "LANG": "ADQL",
-            "QUERY": query,
-        }
-        resp = self.session.get(tap_endpoint, params=params)
-        return resp.text
-
-    @handle_exceptions
-    def get_software_metadata_tap_async(self, query):
-        """Tap async query for software discovery.
-
-        :param str query: ADQL query string, e.g. "SELECT * FROM sdm.software"
-        :return: A dict containing the job_id.
-        :rtype: dict
-        """
-        tap_endpoint = f"{self.srcnet_mm_software_discovery_tap_url}/async"
-        uws_ns = {"uws": "http://www.ivoa.net/xml/UWS/v1.0"}
-
-        # --- Submit job ---
-        resp = self.session.post(
-            tap_endpoint,
-            data={"LANG": "ADQL", "QUERY": query},
-            timeout=10,
+        service = TAPService(
+            self.srcnet_mm_software_discovery_tap_url,
+            session=self.session
         )
-        resp.raise_for_status()
-
-        try:
-            root = ElementT.fromstring(resp.text)
-            job_id = root.findtext("uws:jobId", namespaces=uws_ns)
-        except ElementT.ParseError as e:
-            raise RuntimeError(f"Invalid XML response: {resp.text[:200]}") from e
-
-        if not job_id or not isinstance(job_id, str):
-            raise RuntimeError(f"Invalid job_id extracted: {job_id}")
-
-        job_id = job_id.strip()
-        job_url = f"{tap_endpoint}/{job_id}"
-
-        log.info(f"[TAP] Submitted job {job_id}")
-
-        self.session.post(f"{job_url}/phase", data={"PHASE": "RUN"}, timeout=10).raise_for_status()
-
-        return {"job_id": job_id}
+        if sync:
+            return service.run_sync(query)
+        else:
+            job = service.submit_job(query)
+            job.run()
+            log.info(f"[TAP] Submitted async job {job.job_id}")
+            return job
 
     @handle_exceptions
     def get_software_discovery_async_job_status(self, job_id):
-        """Get the status of an async TAP job.
+        """Get the status of an async TAP job using pyvo's AsyncTAPJob.
 
         :param str job_id: The job identifier.
         :return: A dict with status and optionally result or error details.
         :rtype: dict
         """
         job_url = f"{self.srcnet_mm_software_discovery_tap_url}/async/{job_id}"
+        job = pyvo.dal.AsyncTAPJob(job_url, session=self.session)
 
-        try:
-            phase_resp = self.session.get(f"{job_url}/phase", timeout=10)
-            phase_resp.raise_for_status()
-        except Exception as e:
-            log.error(f"[TAP] Failed to fetch phase for job {job_id}: {e}")
-            raise
-
-        phase = phase_resp.text.strip()
-
-        if phase == "COMPLETED":
-            result_resp = self.session.get(f"{job_url}/results/result", timeout=10, allow_redirects=True)
-            result_resp.raise_for_status()
-            return {"status": "COMPLETED", "result": result_resp.text}
-
-        if phase in ("ERROR", "ABORTED"):
-            try:
-                err = self.session.get(f"{job_url}/error", timeout=5)
-                try:
-                    root = ElementT.fromstring(err.text)
-                    info = root.find(".//{http://www.ivoa.net/xml/VOTable/v1.3}INFO")
-                    detail = info.text if info is not None else err.text[:200]
-                except Exception:
-                    detail = err.text[:200]
-            except Exception:
-                detail = "No error details available"
-
-            log.error(f"[TAP] job_id={job_id} phase={phase} detail={detail}")
-            return {"status": phase, "error": detail, "job_id": job_id}
-
-        return {"status": phase}
+        return job.fetch_result()
 
 
 SRCNet = SRCNetClass()
