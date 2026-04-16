@@ -35,7 +35,7 @@ class Conf(_config.ConfigNamespace):
     )
     SRCNET_MM_SOFTWARE_DISCOVERY_TAP_URL = _config.ConfigItem(
         "https://software-discovery.srcnet.skao.int/tap",
-        "SrcNet TAP query service URL"
+        "SRCNet Software Discovery TAP service URL"
     )
 
 conf = Conf()
