@@ -33,6 +33,10 @@ class Conf(_config.ConfigNamespace):
         'S_dec',
         'DEC column name in IVOA ObsCore table'
     )
+    SRCNET_MM_SOFTWARE_DISCOVERY_TAP_URL = _config.ConfigItem(
+        "https://software-discovery.srcnet.skao.int/tap",
+        "SrcNet TAP query service URL"
+    )
 
 conf = Conf()
 

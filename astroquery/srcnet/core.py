@@ -1,29 +1,28 @@
 import base64
 import json
 import os
-import qrcode
 import random
-import requests
-import sys
 import textwrap
 import time
+import xml.etree.ElementTree as ElementT
 from functools import wraps
+from urllib.parse import urlencode
 
 import pyvo
-import astropy.units
+import qrcode
+import requests
 from astropy import log
-from astroquery.query import BaseQuery, BaseVOQuery
-from astroquery.utils import commons, async_to_sync
-from astroquery.utils.class_or_instance import class_or_instance
-from astropy.coordinates import SkyCoord
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 from pyvo.dal.adhoc import DatalinkResults
-from urllib.parse import urlencode
-from . import conf
 
+from astroquery.query import BaseQuery, BaseVOQuery
 from astroquery.srcnet.exceptions import (handle_exceptions,
-    NoAccessTokenFoundInResponse,QueryRegionSearchAreaAmbiguous,
-    QueryRegionSearchAreaUndefined, UnsupportedAccessProtocol, UnsupportedOIDCFlow)
+                                          NoAccessTokenFoundInResponse, QueryRegionSearchAreaAmbiguous,
+                                          QueryRegionSearchAreaUndefined, UnsupportedAccessProtocol,
+                                          UnsupportedOIDCFlow)
+from astroquery.utils import commons
+from . import conf
 
 __all__ = ['SRCNet', 'SRCNetClass']  # specifies what to import
 
@@ -33,10 +32,11 @@ def exchange_token_for_service(service):
     """ Decorator to exchange an existing access token for one with an audience
     corresponding to the required service.
     """
+
     def exchange_token(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            if self.access_token and self.refresh_token:                                                                #FIXME: Can exchange token rather than using refresh flow in v1.8.3
+            if self.access_token and self.refresh_token:  # FIXME: Can exchange token rather than using refresh flow in v1.8.3
                 audience = self._decode_access_token().get('aud')
                 if audience != service:
                     exchange_token_endpoint = \
@@ -77,13 +77,16 @@ def exchange_token_for_service(service):
                 log.debug("Either access token or refresh token are not set, will not "
                           "attempt token exchange.")
             return func(self, *args, **kwargs)
+
         return wrapper
+
     return exchange_token
 
 
 @handle_exceptions
 def refresh_token_if_expired(func):
     """ Decorator to try to refresh an access token if it's expired. """
+
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         if self.access_token and self.refresh_token:
@@ -118,6 +121,7 @@ def refresh_token_if_expired(func):
             log.debug("Either access token or refresh token are not set, will not "
                       "attempt token refresh.")
         return func(self, *args, **kwargs)
+
     return wrapper
 
 
@@ -129,6 +133,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     srcnet_ivoa_obscore_table_name = conf.SRCNET_IVOA_OBSCORE_TABLE_NAME
     srcnet_ivoa_obscore_ra_col_name = conf.SRCNET_IVOA_OBSCORE_RA_COL_NAME
     srcnet_ivoa_obscore_dec_col_name = conf.SRCNET_IVOA_OBSCORE_DEC_COL_NAME
+    srcnet_mm_software_discovery_tap_url = conf. SRCNET_MM_SOFTWARE_DISCOVERY_TAP_URL
 
     def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
                  refresh_token_path='/tmp/refresh_token', verbose=False):
@@ -148,7 +153,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             with open(access_token_path, 'r') as f:
                 access_token = f.read()
         self._access_token = access_token
-        self._update_authorisation_requests_session()       # use this access token as the bearer token for requests
+        self._update_authorisation_requests_session()  # use this access token as the bearer token for requests
 
         # check for refresh tokens in constructor, environment then persisted file (in that order)
         if refresh_token:
@@ -284,7 +289,6 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             print()
             return {}
         print()
-
 
     def _persist_tokens(self):
         """ Save access and refresh tokens.
@@ -483,13 +487,13 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                       dist ASC
                     """.format(
                 columns='{}.*'.format(self.srcnet_ivoa_obscore_table_name)
-                    if columns == '*' else ','.join(columns),
+                if columns == '*' else ','.join(columns),
                 ra_column_name=self.srcnet_ivoa_obscore_ra_col_name,
                 dec_column_name=self.srcnet_ivoa_obscore_dec_col_name,
                 ra=parsed_coordinates.ra.deg,
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
-                radius=(radius*u.deg).to('arcmin').value
+                radius=(radius * u.deg).to('arcmin').value
             )
         elif width and height:
             query = """
@@ -510,14 +514,14 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                       dist ASC
                     """.format(
                 columns='{}.*'.format(self.srcnet_ivoa_obscore_table_name)
-                    if not columns else ','.join(columns),
+                if not columns else ','.join(columns),
                 ra_column_name=self.srcnet_ivoa_obscore_ra_col_name,
                 dec_column_name=self.srcnet_ivoa_obscore_dec_col_name,
                 ra=parsed_coordinates.ra.deg,
                 dec=parsed_coordinates.dec.deg,
                 table_name=self.srcnet_ivoa_obscore_table_name,
-                width=(width*u.deg).to('arcmin').value,
-                height=(height*u.deg).to('arcmin').value
+                width=(width * u.deg).to('arcmin').value,
+                height=(height * u.deg).to('arcmin').value
             )
         else:
             raise QueryRegionSearchAreaUndefined
@@ -606,7 +610,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         # "CIRCLE" filtering parameter
         elif circle:
             if len(circle) != 3:
-               raise ValueError(f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
+                raise ValueError(f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
             longitude, latitude, radius = circle
             params["POS"] = f"CIRCLE {longitude} {latitude} {radius}"
         # "POLYGON" filtering parameter
@@ -678,5 +682,99 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         resp.raise_for_status()
         return resp.json()
 
-SRCNet = SRCNetClass()
+    @handle_exceptions
+    def get_software_metadata_tap_sync(self, query):
+        """Tap sync query for software discovery.
 
+        :param str query: ADQL query string, e.g. "SELECT * FROM sdm.software"
+        :return: HTTP response from TAP endpoint
+        :rtype: requests.Response
+        """
+        tap_endpoint = f"{self.srcnet_mm_software_discovery_tap_url}/sync"
+        params = {
+            "LANG": "ADQL",
+            "QUERY": query,
+        }
+        resp = self.session.get(tap_endpoint, params=params)
+        return resp.text
+
+    @handle_exceptions
+    def get_software_metadata_tap_async(self, query):
+        """Tap async query for software discovery.
+
+        :param str query: ADQL query string, e.g. "SELECT * FROM sdm.software"
+        :return: A dict containing the job_id.
+        :rtype: dict
+        """
+        tap_endpoint = f"{self.srcnet_mm_software_discovery_tap_url}/async"
+        uws_ns = {"uws": "http://www.ivoa.net/xml/UWS/v1.0"}
+
+        # --- Submit job ---
+        resp = self.session.post(
+            tap_endpoint,
+            data={"REQUEST": "doQuery", "LANG": "ADQL", "QUERY": query},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        try:
+            root = ElementT.fromstring(resp.text)
+            job_id = root.findtext("uws:jobId", namespaces=uws_ns)
+        except ElementT.ParseError as e:
+            raise RuntimeError(f"Invalid XML response: {resp.text[:200]}") from e
+
+        if not job_id or not isinstance(job_id, str):
+            raise RuntimeError(f"Invalid job_id extracted: {job_id}")
+
+        job_id = job_id.strip()
+        job_url = f"{tap_endpoint}/{job_id}"
+
+        log.info(f"[TAP] Submitted job {job_id}")
+
+        self.session.post(f"{job_url}/phase", data={"PHASE": "RUN"}, timeout=10).raise_for_status()
+
+        return {"job_id": job_id}
+
+    @handle_exceptions
+    def get_software_discovery_async_job_status(self, job_id):
+        """Get the status of an async TAP job.
+
+        :param str job_id: The job identifier.
+        :return: A dict with status and optionally result or error details.
+        :rtype: dict
+        """
+        job_url = f"{self.srcnet_mm_software_discovery_tap_url}/async/{job_id}"
+
+        try:
+            phase_resp = self.session.get(f"{job_url}/phase", timeout=10)
+            phase_resp.raise_for_status()
+        except Exception as e:
+            log.error(f"[TAP] Failed to fetch phase for job {job_id}: {e}")
+            raise
+
+        phase = phase_resp.text.strip()
+
+        if phase == "COMPLETED":
+            result_resp = self.session.get(f"{job_url}/results/result", timeout=10, allow_redirects=True)
+            result_resp.raise_for_status()
+            return {"status": "COMPLETED", "result": result_resp.text}
+
+        if phase in ("ERROR", "ABORTED"):
+            try:
+                err = self.session.get(f"{job_url}/error", timeout=5)
+                try:
+                    root = ElementT.fromstring(err.text)
+                    info = root.find(".//{http://www.ivoa.net/xml/VOTable/v1.3}INFO")
+                    detail = info.text if info is not None else err.text[:200]
+                except Exception:
+                    detail = err.text[:200]
+            except Exception:
+                detail = "No error details available"
+
+            log.error(f"[TAP] job_id={job_id} phase={phase} detail={detail}")
+            return {"status": phase, "error": detail, "job_id": job_id}
+
+        return {"status": phase}
+
+
+SRCNet = SRCNetClass()
