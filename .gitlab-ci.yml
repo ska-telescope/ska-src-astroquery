@@ -1,12 +1,7 @@
-image: docker:git
-services:
-- docker:dind
-
 stages:
 - lint
 - test
 - metrics
-- deploy
 
 # ── Lint ──────────────────────────────────────────────────────────────────────
 
@@ -69,31 +64,3 @@ create-ci-metrics:
     when: always
     paths:
       - build/badges/
-
-# ── Deploy ────────────────────────────────────────────────────────────────────
-
-pages:
-  only:
-    - main
-  stage: deploy
-  image:
-    name: python:latest
-  script:
-  - python3 -m pip install -U sphinx sphinx-astropy
-  - python3 -m pip install .
-  - cd docs && make html
-  artifacts:
-    paths:
-      - docs/_build/html
-  publish: docs/_build/html
-
-pypi-publish:
-  only:
-    - main
-  stage: deploy
-  image:
-    name: python:latest
-  script:
-    - pip install build twine
-    - python -m build
-    - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token python -m twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*
