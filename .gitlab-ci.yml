@@ -3,7 +3,74 @@ services:
 - docker:dind
 
 stages:
+- lint
+- test
+- metrics
 - deploy
+
+# ── Lint ──────────────────────────────────────────────────────────────────────
+
+python-lint:
+  stage: lint
+  image: python:3.12-slim
+  script:
+    - pip install -q ruff
+    - mkdir -p build/reports
+    - ruff check --output-format=junit astroquery/srcnet/ > build/reports/linting.xml || true
+    - ruff check astroquery/srcnet/
+  artifacts:
+    when: always
+    reports:
+      junit: build/reports/linting.xml
+    paths:
+      - build/reports/
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+python-test:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - pip install -q pytest pytest-cov
+    - pip install -q -r astroquery/srcnet/tests/requirements.txt
+    - pip install -q --no-deps -e .
+    - mkdir -p build/reports
+    - pytest astroquery/srcnet/tests/
+        --junitxml=build/reports/unit-tests.xml
+        --cov=astroquery.srcnet
+        --cov-report=xml:build/reports/code-coverage.xml
+        --cov-report=term-missing
+  artifacts:
+    when: always
+    reports:
+      junit: build/reports/unit-tests.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: build/reports/code-coverage.xml
+    paths:
+      - build/reports/
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+create-ci-metrics:
+  stage: metrics
+  image: python:3.12-slim
+  when: always
+  needs:
+    - job: python-lint
+      optional: true
+    - job: python-test
+      optional: true
+  script:
+    - pip install -q anybadge
+    - python scripts/create_ci_metrics.py
+  artifacts:
+    when: always
+    paths:
+      - build/badges/
+
+# ── Deploy ────────────────────────────────────────────────────────────────────
 
 pages:
   only:
@@ -30,5 +97,3 @@ pypi-publish:
     - pip install build twine
     - python -m build
     - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token python -m twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*
-
-
