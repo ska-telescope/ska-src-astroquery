@@ -33,6 +33,7 @@ python-test:
     - pip install -q pytest pytest-cov
     - pip install -q -r astroquery/srcnet/tests/requirements.txt
     - pip install -q --no-deps -e .
+    - printf 'version = "0.0.0.dev0"\ngithash = ""\nastropy_helpers_version = "unknown"\n' > astroquery/version.py
     - mkdir -p build/reports
     - pytest astroquery/srcnet/tests/
         --junitxml=build/reports/unit-tests.xml
