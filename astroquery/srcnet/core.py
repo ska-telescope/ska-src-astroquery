@@ -2,30 +2,124 @@ import base64
 import json
 import os
 import qrcode
-import random
 import requests
-import sys
-import textwrap
 import time
 from functools import wraps
 
-import pyvo
-import astropy.units
 from astropy import log
 from astroquery.query import BaseQuery, BaseVOQuery
-from astroquery.utils import commons, async_to_sync
-from astroquery.utils.class_or_instance import class_or_instance
-from astropy.coordinates import SkyCoord
-from astropy import units as u
-from pyvo.dal.adhoc import DatalinkResults
-from urllib.parse import urlencode
 from . import conf
 
 from astroquery.srcnet.exceptions import (handle_exceptions,
-    NoAccessTokenFoundInResponse,QueryRegionSearchAreaAmbiguous,
-    QueryRegionSearchAreaUndefined, UnsupportedAccessProtocol, UnsupportedOIDCFlow)
+    NoAccessTokenFoundInResponse,UnsupportedOIDCFlow)
 
-__all__ = ['SRCNet', 'SRCNetClass']  # specifies what to import
+__all__ = ['SRCNet', 'SRCNetClass']
+
+_CHAT_HELP = """\
+SRCNet Chat
+===========
+
+The chat service answers questions about software registered in the SKA
+Software Discovery catalogue, CAOM2 observational data in the data discovery
+TAP service, and how to use the astroquery.srcnet library.
+
+Conversation history is preserved between calls so you can ask follow-up
+questions without repeating context.  Call SRCNet._chat.reset() to start fresh.
+
+─── Asking questions ────────────────────────────────────────────────────────
+
+  SRCNet.chat("Show me all stable software that requires a GPU")
+  SRCNet.chat("Which of those support amd64 architecture?")   # follow-up
+
+  SRCNet.chat("How many observations are there per collection?")
+  SRCNet.chat("Find JCMT observations of Orion from 2023")
+
+  SRCNet.chat("How do I authenticate and download a file with SRCNet?")
+  SRCNet.chat("What methods does DataAccessClass expose?")
+
+  SRCNet._chat.reset()   # clear history
+
+─── Software Discovery — without chat ───────────────────────────────────────
+
+  from astroquery.srcnet import SoftwareDiscovery
+
+  # Keyword filters
+  t = SoftwareDiscovery.query_software(status="STABLE", requires_gpu=True)
+  t = SoftwareDiscovery.query_software(science_category="Continuum Science")
+
+  # Single entry by URI
+  t = SoftwareDiscovery.get_software("ska:wsclean:docker-wsclean@3.4")
+
+  # Search by Docker image name
+  t = SoftwareDiscovery.query_by_image("wsclean")
+
+  # Natural language → ADQL (inspect before running)
+  adql = SoftwareDiscovery.nl_to_adql("list Docker images for continuum imaging")
+  print(adql)
+
+  # Natural language → ADQL + execute in one step
+  adql, t = SoftwareDiscovery.query_natural(
+      "show stable software that requires a GPU and supports amd64",
+      verbose=True,   # prints the generated ADQL
+  )
+
+─── Data Discovery — without chat ───────────────────────────────────────────
+
+  from astropy.coordinates import SkyCoord
+  import astropy.units as u
+  from astroquery.srcnet import DataDiscovery
+
+  # Browse the archive
+  DataDiscovery.get_collections()
+  DataDiscovery.get_tables()
+
+  # Cone search
+  t = DataDiscovery.query_region(
+      SkyCoord(83.8, -5.4, unit="deg"),
+      radius=0.5 * u.deg,
+  )
+
+  # Target name search
+  t = DataDiscovery.query_name("Orion", collection="JCMT")
+
+  # Natural language → ADQL (inspect before running)
+  adql = DataDiscovery.nl_to_adql("how many observations per collection?")
+  print(adql)
+
+  # Natural language → ADQL + execute in one step
+  adql, t = DataDiscovery.query_natural(
+      "show the 10 most recent JCMT observations with target name and exposure time",
+      verbose=True,   # prints the generated ADQL
+  )
+
+─── Data Access — download, metadata, SODA cutouts ──────────────────────────
+
+  SRCNet.login()                            # OIDC device flow — required once
+  da = SRCNet.get_data_access()             # DataAccessClass
+
+  # Download a file to the current directory
+  da.get_data("testing", "PTF10tce.fits")
+
+  # Retrieve JSON metadata
+  meta = da.get_metadata("testing", "PTF10tce.fits")
+
+  # Circular SODA spatial cutout
+  da.soda_cutout("testing", "PTF10tce.fits", "output/cutout.fits",
+                 circle=(351.9867, 8.7787, 0.1))
+
+  # Spectral cutout within a spatial region
+  da.soda_cutout("testing", "cube.fits", "output/subcube.fits",
+                 circle=(83.8, -5.4, 0.5), band="0.0002 0.0003")
+
+─── Suppress display / use results programmatically ─────────────────────────
+
+  t = SRCNet.chat(
+      "Give me all stable software with a Docker artifact",
+      display=False,   # skip markdown rendering, just return the Table
+  )
+  if t is not None:
+      print(t["uri", "status"])
+"""
 
 
 @handle_exceptions
@@ -122,17 +216,23 @@ def refresh_token_if_expired(func):
 
 
 class SRCNetClass(BaseVOQuery, BaseQuery):
-    srcnet_authn_api_address = conf.SRCNET_AUTHN_API_ADDRESS
-    srcnet_dm_api_base_address = conf.SRCNET_DM_API_ADDRESS
-    srcnet_tap_service_url_base = conf.SRCNET_TAP_SERVICE_URL_BASE
-    srcnet_datalink_service_url = conf.SRCNET_DATALINK_SERVICE_URL
-    srcnet_ivoa_obscore_table_name = conf.SRCNET_IVOA_OBSCORE_TABLE_NAME
-    srcnet_ivoa_obscore_ra_col_name = conf.SRCNET_IVOA_OBSCORE_RA_COL_NAME
-    srcnet_ivoa_obscore_dec_col_name = conf.SRCNET_IVOA_OBSCORE_DEC_COL_NAME
 
     def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
-                 refresh_token_path='/tmp/refresh_token', verbose=False):
+                 refresh_token_path='/tmp/refresh_token', verbose=False, environment=None):
         super().__init__()
+
+        from . import _env_urls, ENVIRONMENTS
+        if environment is not None:
+            if environment not in ENVIRONMENTS:
+                raise ValueError(
+                    f"Unknown environment {environment!r}. Valid options: {list(ENVIRONMENTS)}"
+                )
+            conf.SRCNET_ENVIRONMENT = environment
+        urls = _env_urls()
+        self.srcnet_authn_api_address      = urls["authn_api"]
+        self.srcnet_dm_api_base_address    = urls["dm_api"]
+        self.srcnet_data_access_tap_url    = urls["data_access_tap"]
+        self.srcnet_datalink_service_url   = urls["datalink"]
 
         self.session = requests.Session()
 
@@ -165,6 +265,16 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         else:
             log.setLevel('INFO')
 
+        from .chat import SRCNetChat
+        from .software_discovery import SoftwareDiscoveryClass
+        from .data_discovery import DataDiscoveryClass
+        from .data_access import DataAccessClass
+        self._sd          = SoftwareDiscoveryClass(tap_url=urls["software_tap"])
+        self._tap_client  = DataDiscoveryClass(tap_url=urls["tap"])
+        self._chat        = SRCNetChat(self._sd, backend="chatserver",
+                                       chatserver_url=urls["chat"])
+        self._data_access = DataAccessClass(self)
+
     @property
     def access_token(self):
         return self._access_token
@@ -182,22 +292,60 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     def refresh_token(self, new_refresh_token):
         self._refresh_token = new_refresh_token
 
-    def _create_tap_query(self, query, sync):
-        """ Constructs a TAP query but doesn't execute/submit it."
+    # ── Factory methods ───────────────────────────────────────────────────────
 
-        :param str query: An ADQL query.
-        :param bool sync: Run in synchronous mode?
+    def get_tap(self):
+        """Return the DataDiscoveryClass configured for the current environment."""
+        return self._tap_client
 
-        :return: The query.
-        :rtype: pyvo.dal.TAPQuery
+    def get_software_discovery(self):
+        """Return the SoftwareDiscoveryClass configured for the current environment."""
+        return self._sd
+
+    def get_data_access(self):
+        """Return a :class:`~astroquery.srcnet.DataAccessClass` for this environment.
+
+        The returned object exposes download, metadata, and SODA cutout
+        operations.  :meth:`login` must be called before using any of these
+        methods if the services require authentication.
+
+        Returns
+        -------
+        :class:`~astroquery.srcnet.DataAccessClass`
+
+        Examples
+        --------
+        >>> SRCNet.login()
+        >>> da = SRCNet.get_data_access()
+        >>> da.get_data("testing", "PTF10tce.fits")
+        >>> meta = da.get_metadata("testing", "PTF10tce.fits")
+        >>> da.soda_cutout("testing", "PTF10tce.fits", "cutout.fits",
+        ...                circle=(351.9867, 8.7787, 0.1))
         """
-        query = pyvo.dal.TAPQuery(
-            baseurl=self.srcnet_tap_service_url_base,
-            query=query,
-            mode='sync' if sync else 'async',
-            language='ADQL'
-        )
-        return query
+        return self._data_access
+
+    def get_metadata(self, namespace, name):
+        """Convenience proxy — delegates to :meth:`~DataAccessClass.get_metadata`."""
+        return self._data_access.get_metadata(namespace, name)
+
+    def soda_cutout(self, namespace, name, output_file=None, **kwargs):
+        """Convenience proxy — delegates to :meth:`~DataAccessClass.soda_cutout`."""
+        return self._data_access.soda_cutout(namespace, name, output_file, **kwargs)
+
+    def get_chat(self, chatserver_url: str = None, **kwargs):
+        """Return a SRCNetChat configured for the current environment.
+
+        Parameters
+        ----------
+        chatserver_url : str, optional
+            Override the chatserver URL. Defaults to the environment's chat URL.
+        **kwargs
+            Forwarded to :class:`~astroquery.srcnet.chat.SRCNetChat`.
+        """
+        from .chat import SRCNetChat
+        from . import _env_urls
+        cs_url = chatserver_url or _env_urls()["chat"]
+        return SRCNetChat(self._sd, backend="chatserver", chatserver_url=cs_url, **kwargs)
 
     def _decode_access_token(self):
         """ Decode an access token.
@@ -240,16 +388,14 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         qr.add_data(device_authorization_response.json().get('verification_uri_complete'))
 
         # add instructional text for user if they don't want to use qr code
-        user_instruction_text = ("Scan the QR code, or using a browser on another device, visit " +
-                                 "{verification_uri} and enter code {user_code}".format(
-                                     verification_uri=device_authorization_response.json().get('verification_uri'),
-                                     user_code=device_authorization_response.json().get('user_code')))
+        user_instruction_text = ("Scan the QR code, or visit the following URL in your browser to authenticate:\n  " +
+                                 "{verification_uri_complete}".format(
+                                     verification_uri_complete=device_authorization_response.json().get('verification_uri_complete')))
 
-        wrapped_string = textwrap.fill(user_instruction_text, width=50)
         print()
         print("-" * 50)
         print()
-        print(wrapped_string)
+        print(user_instruction_text)
         qr.print_ascii()
         print("-" * 50)
         print()
@@ -265,7 +411,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 token_response.raise_for_status()
                 success = True
                 break
-            except Exception as e:
+            except Exception:
                 try:
                     log.debug(token_response.json())
                 except requests.exceptions.JSONDecodeError:
@@ -313,64 +459,44 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             "Authorization": "Bearer {}".format(self.access_token)
         })
 
-    @handle_exceptions
-    @exchange_token_for_service('data-management-api')
-    @refresh_token_if_expired
-    def get_data(self, namespace, name, sort='nearest_by_ip', ip_address=None):
-        """ Locate and download data given a data identifier.
-
-        :param str namespace: The data identifier's namespace.
-        :param str name: The data identifier's name.
-        :param str sort: The sorting algorithm to use (random || nearest_by_ip)
-        :param str ip_address: The ip address to geolocate the nearest replica to. Leave blank to use the requesting
-            client ip (sort == nearest_by_ip only)
-
-        :return: Nothing
-        :rtype: None
+    def chat(self, message: str = None, **kwargs):
         """
-        # query DM API to get a list of data replicas for this namespace/name and pick the first
-        locate_data_endpoint = "{api_url}/data/locate/{namespace}/{name}?sort={sort}&ip_address={ip_address}".format(
-            api_url=self.srcnet_dm_api_base_address, namespace=namespace, name=name, sort=sort,
-            ip_address=ip_address if ip_address else "")
-        resp = self.session.get(locate_data_endpoint)
-        resp.raise_for_status()
-        location_response = resp.json()
+        Conversational interface to SRCNet services.
 
-        # pick the first replica from the first site in the response (ordered if sorting algorithm is used)
-        position = 0
-        rse = location_response[position].get('identifier')
-        replicas = location_response[position].get('replicas')
-        associated_storage_area_id = location_response[position].get('associated_storage_area_id')
+        When called with no arguments, prints usage examples and returns ``None``.
+        When called with a message, sends it to the SRCNet chat service and
+        returns the resulting ``~astropy.table.Table`` (or ``None`` if no TAP
+        query was needed).
 
-        # pick a random replica from this site (only relevant if multiple exist)
-        access_url = random.choice(replicas)
+        The chat service can answer questions about:
 
-        # download the data
-        log.info("Downloading data from {rse} ({access_url})".format(rse=rse, access_url=access_url))
-        if access_url.startswith('https') or access_url.startswith('davs'):
-            pass
-        else:
-            raise UnsupportedAccessProtocol(access_url.split(':')[0])
+        - Software registered in the SKA Software Discovery catalogue
+        - CAOM2 observational data in the data discovery TAP service
+        - How to use the ``astroquery.srcnet`` library
 
-        # get the storage read access token for the associated storage area
-        get_download_token_namespace_endpoint = "{api_url}/data/download/{storage_area_uuid}/{namespace}/{name}".format(
-            api_url=self.srcnet_dm_api_base_address, storage_area_uuid=associated_storage_area_id, namespace=namespace,
-            name=name)
-        resp = self.session.get(get_download_token_namespace_endpoint)
-        resp.raise_for_status()
-        storage_access_token = resp.json().get('access_token')
+        Parameters
+        ----------
+        message : str, optional
+            Natural-language question.  Omit to print usage examples.
+        **kwargs
+            Forwarded to :class:`~astroquery.srcnet.SRCNetChat.__call__`
+            (e.g. ``display=False`` to suppress rendering).
 
-        # download data using this access token
-        resp = requests.get(access_url, headers={
-            'Authorization': 'Bearer {access_token}'.format(access_token=storage_access_token)
-        }, stream=True)
-        resp.raise_for_status()
-        with open(name, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024):
-                print("{}KB downloaded".format(round(os.path.getsize(name) / 1024), 0), end='\r')
-                f.write(chunk)
-                f.flush()
-        print('\n')
+        Returns
+        -------
+        `~astropy.table.Table` or None
+
+        Examples
+        --------
+        >>> SRCNet.chat()                                         # show help
+        >>> SRCNet.chat("Show stable software that needs a GPU")  # query
+        >>> SRCNet.chat("Which support amd64?")                   # follow-up
+        >>> SRCNet._chat.reset()                                  # new session
+        """
+        if message is None:
+            print(_CHAT_HELP)
+            return None
+        return self._chat(message, **kwargs)
 
     @handle_exceptions
     def login(self, requested_oidc_flow='device'):
@@ -401,282 +527,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         self._persist_tokens()
 
-    @handle_exceptions
-    def query_tap(self, query, sync=True):
-        """ Run a TAP query either synchronously or asynchronously.
-
-        :param str query: An ADQL query.
-        :param bool sync: Run in synchronous mode?
-
-        :return: The query response.
-        :rtype: pyvo.dal.TAPResults or requests.Response
-        """
-        query = self._create_tap_query(query=query, sync=sync)
-        if sync:
-            rtn = query.execute()
-        else:
-            rtn = query.submit()
-        return rtn
-
-    @handle_exceptions
-    def query_object(self, object_name, radius=None, width=None, height=None,
-                     columns='*', row_limit=100, sync=True):
-        """ Search around a given object name.
-
-        :param str object_name: The object name to be resolved.
-        :param float radius: Search radius (deg).
-        :param float width: Search width (deg).
-        :param float height: Search height (deg).
-        :param list columns: The table columns to include in the results.
-        :param int row_limit: Maximum number of rows to return.
-        :param bool sync: Run in synchronous mode?
-
-        :return: The query response.
-        :rtype: pyvo.dal.TAPResults or requests.Response
-        """
-        coordinates = SkyCoord.from_name(object_name, frame="icrs")
-        return self.query_region(
-            coordinates=coordinates,
-            radius=radius,
-            width=width,
-            height=height,
-            columns=columns,
-            row_limit=row_limit,
-            sync=sync
-        )
-
-    @handle_exceptions
-    def query_region(self, coordinates, radius=None, width=None, height=None,
-                     columns='*', row_limit=100, sync=True):
-        """ Search around given coordinates.
-
-        :param str coordinates: The coordinates to search around.
-        :param float radius: Search radius (deg).
-        :param float width: Search width (deg).
-        :param float height: Search height (deg).
-        :param str columns: The table columns to include in the results.
-        :param int row_limit: Maximum number of rows to return.
-        :param bool sync: Run in synchronous mode?
-
-        :return: The query response.
-        :rtype: pyvo.dal.TAPResults or requests.Response
-        """
-        parsed_coordinates = commons.parse_coordinates(coordinates)
-        if all([radius, width, height]):
-            raise QueryRegionSearchAreaAmbiguous
-        if radius:
-            query = """
-                    SELECT
-                      {columns},
-                      DISTANCE(
-                        POINT('ICRS', {ra_column_name}, {dec_column_name}),
-                        POINT('ICRS', {ra}, {dec})
-                      ) AS dist
-                    FROM
-                      {table_name}
-                    WHERE
-                      1 = CONTAINS(
-                        POINT('ICRS', {ra_column_name}, {dec_column_name}),
-                        CIRCLE('ICRS', {ra}, {dec}, {radius})
-                      )
-                    ORDER BY
-                      dist ASC
-                    """.format(
-                columns='{}.*'.format(self.srcnet_ivoa_obscore_table_name)
-                    if columns == '*' else ','.join(columns),
-                ra_column_name=self.srcnet_ivoa_obscore_ra_col_name,
-                dec_column_name=self.srcnet_ivoa_obscore_dec_col_name,
-                ra=parsed_coordinates.ra.deg,
-                dec=parsed_coordinates.dec.deg,
-                table_name=self.srcnet_ivoa_obscore_table_name,
-                radius=(radius*u.deg).to('arcmin').value
-            )
-        elif width and height:
-            query = """
-                    SELECT
-                      {columns},
-                      DISTANCE(
-                        POINT('ICRS', {ra_column_name}, {dec_column_name}),
-                        POINT('ICRS', {ra}, {dec})
-                      ) as dist
-                    FROM
-                      {table_name}
-                    WHERE
-                      1 = CONTAINS(
-                        POINT('ICRS', {ra_column_name}, {dec_column_name}),
-                        BOX('ICRS', {ra}, {dec}, {width}, {height})
-                      )
-                    ORDER BY
-                      dist ASC
-                    """.format(
-                columns='{}.*'.format(self.srcnet_ivoa_obscore_table_name)
-                    if not columns else ','.join(columns),
-                ra_column_name=self.srcnet_ivoa_obscore_ra_col_name,
-                dec_column_name=self.srcnet_ivoa_obscore_dec_col_name,
-                ra=parsed_coordinates.ra.deg,
-                dec=parsed_coordinates.dec.deg,
-                table_name=self.srcnet_ivoa_obscore_table_name,
-                width=(width*u.deg).to('arcmin').value,
-                height=(height*u.deg).to('arcmin').value
-            )
-        else:
-            raise QueryRegionSearchAreaUndefined
-
-        return self.query_tap(query=query, sync=sync)
-
-    @handle_exceptions
-    def soda_cutout(self, namespace, name, output_file,
-                    sort=None, client_ip_address=None,
-                    pos=None, circle=None, polygon=None, range_=None, time=None, band=None, pol=None):
-        """ Perform SODA cutout
-
-        :param str namespace: The scope where the data is stored e.g. testing.
-        :param str name: Filename e.g. PTF10tce.fits.
-        :param str sort: (Optional) Specify how the Datalink searches for the SODA service; 'nearest_by_ip' (default) or 'random'.
-        :param str client_ip_address: (Optional) Specify the SODA service IP address e.g. 130.246.210.110. Overrides 'sort'.
-        :param str pos: Alternative to CIRCLE, BOX, or POLYGON e.g. "CIRCLE 351.9 8.77 0.1".
-        :param str circle: (longitude, latitude, radius) e.g. (351.986728, 8.778684, 0.1).
-        :param str polygon: List of several (longitude, latitude) e.g. [(351.9, 8.77), (352.0, 8.7), (352.05, 8.6)].
-        :param str range_: (lon1, lon2, lat1, lat2) Note the appended underscore '_' as 'range' is a standard python function.
-        :param str band: wavelength interval values e.g. BAND=-Inf 300.
-        :param str time: time interval values e.g. TIME=55123.456 55123.466.
-        :param str pol: polarization states e.g. POL=Q.
-        :param str output_file: Path and filename of the resulting cutout file e.g. output/output_file.fits
-
-        :return: The query response.
-        :rtype: FITS file
-        """
-
-        # Use the srcdev.skao.int datalink and add appropriate parameters
-        if sort is None:
-            sort = "nearest_by_ip"
-
-        url_params = {
-            "id": f"{namespace}:{name}",
-            "must_include_soda": "True",
-            "sort": sort,
-        }
-
-        if client_ip_address:
-            url_params["client_ip_address"] = client_ip_address
-
-        datalink_request_url = f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
-        log.debug(f"Using Datalink: {datalink_request_url}")
-
-        datalink_xml = DatalinkResults.from_result_url(datalink_request_url, session=self.session)
-
-        # Search for and extract the accessURL and ID from the Datalink XML
-        for resource in datalink_xml.votable.resources:
-            if resource.type == "meta":
-                if getattr(resource, "ID", None) == "soda-sync":
-                    soda_service = None
-                    id_param = None
-
-                for param in resource.params:
-                    if param.name == "accessURL":
-                        soda_service = param.value
-
-                if resource.groups:
-                    for group in resource.groups:
-                        for entry in group.entries:
-                            if entry.name == "ID":
-                                id_param = entry.value
-                break
-
-        if not soda_service:
-            raise ValueError("Error: SODA service accessURL not found in datalink response.")
-        if not id_param:
-            raise ValueError("Error: Dataset ID not found in datalink response.")
-
-        log.debug(f"Extracted SODA Service: {soda_service}")
-        log.debug(f"Extracted ID: {id_param}")
-
-        # Initialise the 'params' dictionary and start adding the required information for the SODA call
-        params = {}
-        params["ID"] = id_param
-        params["RESPONSEFORMAT"] = "application/fits"
-
-        ### Handle the SODA filtering parameters
-        ### https://www.ivoa.net/documents/SODA/20170517/REC-SODA-1.0.html#tth_sEc3.3
-        #
-
-        # "POS" filering parameter
-        if pos:
-            params["POS"] = pos
-        # "CIRCLE" filtering parameter
-        elif circle:
-            if len(circle) != 3:
-               raise ValueError(f"Error: CIRCLE parameters must be in the form (longitude, latitude, radius)")
-            longitude, latitude, radius = circle
-            params["POS"] = f"CIRCLE {longitude} {latitude} {radius}"
-        # "POLYGON" filtering parameter
-        elif polygon:
-            spatial_region = []
-            for (longitude, latitude) in polygon:
-                spatial_region.append(str(longitude))
-                spatial_region.append(str(latitude))
-            params["POS"] = f"POLYGON {' '.join(spatial_region)}"
-        # "RANGE" filtering parameter
-        elif range_:
-            if len(range_) != 4:
-                raise ValueError(f"Error: RANGE parameters must be in the form; lon1 lon2 lat1 lat2)")
-            longitude1, longitude2, latitude1, latitude2 = range_
-            params["POS"] = f"RANGE {longitude1} {longitude2} {latitude1} {latitude2}"
-        else:
-            log.warning(f"No positional region cutout set.")
-            pass
-
-        # "BAND" filtering parameter
-        if band:
-            if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'BAND'")
-            log.debug(f"Performing a Band cutout with params={params}")
-            params["BAND"] = band
-
-        # "TIME" filtering parameter
-        if time:
-            if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'TIME'")
-            log.debug(f"Performing a Time cutout with params={params}")
-            params["TIME"] = time
-
-        # "POL" filtering parameter
-        if pol:
-            if "POS" not in params:
-                raise ValueError("A positional cutout is also required when using 'POL'")
-            log.debug(f"Performing a Polarization cutout with params={params}")
-            params["POL"] = pol
-        #
-        ###
-
-        # Make the request to SODA
-        log.info(f"Requesting SODA cutout from {soda_service} with params={params}")
-        response = self.session.get(soda_service, params=params, stream=True)
-        response.raise_for_status()
-
-        # Write the SODA response as an output file
-        output_dir = os.path.dirname(output_file)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        with open(output_file, "wb") as f:
-            for chunk in response.iter_content(chunk_size=4096):
-                f.write(chunk)
-                f.flush()
-        print('\n')
-
-        log.debug(f"SODA cutout saved to '{output_file}'")
-
-    @handle_exceptions
-    @exchange_token_for_service('data-management-api')
-    @refresh_token_if_expired
-    def get_metadata(self, namespace, name):
-        """
-        Get metadata for a given data identifier from the Data Management API.
-        """
-        metadata_url = f"{self.srcnet_dm_api_base_address}/metadata/{namespace}/{name}?plugin=POSTGRES_JSON"
-        resp = self.session.get(metadata_url)
-        resp.raise_for_status()
-        return resp.json()
-
 SRCNet = SRCNetClass()
+
+# Expose the DataAccessClass singleton so `from astroquery.srcnet import DataAccess` works.
+from .data_access import DataAccessClass as _DataAccessClass  # noqa: E402
+_DataAccessClass.__module__ = __name__  # tidy repr
 

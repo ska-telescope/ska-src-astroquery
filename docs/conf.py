@@ -37,11 +37,35 @@ except ImportError:
           'be installed')
     sys.exit(1)
 
-from configparser import ConfigParser
-conf = ConfigParser()
+try:
+    import tomllib as _tomllib
+except ImportError:
+    try:
+        import tomli as _tomllib
+    except ImportError:
+        _tomllib = None
 
-conf.read([os.path.join(os.path.dirname(__file__), '..', 'setup.cfg')])
-setup_cfg = dict(conf.items('metadata'))
+_pyproject_path = os.path.join(os.path.dirname(__file__), '..', 'pyproject.toml')
+if _tomllib is not None and os.path.exists(_pyproject_path):
+    with open(_pyproject_path, 'rb') as _f:
+        _pyproject = _tomllib.load(_f)
+    _proj = _pyproject.get('project', {})
+    setup_cfg = {
+        'name': _proj.get('name', 'astroquery'),
+        'author': ', '.join(
+            a.get('name', '') for a in (_proj.get('authors') or [])
+        ) or 'Astropy Developers',
+        'edit_on_github': 'False',
+    }
+else:
+    from configparser import ConfigParser as _CP
+    _cp = _CP()
+    _cp.read([_pyproject_path.replace('pyproject.toml', 'setup.cfg')])
+    setup_cfg = dict(_cp.items('metadata')) if _cp.has_section('metadata') else {
+        'name': 'astroquery',
+        'author': 'Astropy Developers',
+        'edit_on_github': 'False',
+    }
 
 # -- General configuration ----------------------------------------------------
 
@@ -86,8 +110,7 @@ copyright = '{0}, {1}'.format(
 # |version| and |release|, also used in various other places throughout the
 # built documents.
 
-__import__(project)
-package = sys.modules[project]
+import astroquery as package
 
 # The short X.Y version.
 version = package.__version__.split('-', 1)[0]
