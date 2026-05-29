@@ -23,12 +23,6 @@ try:
 except Exception:
     _env_urls = None  # type: ignore[assignment]
 
-try:
-    from IPython.display import display, Markdown  # type: ignore[assignment]
-except Exception:
-    display = None  # type: ignore[assignment]
-    Markdown = None  # type: ignore[assignment]
-
 HELPDESK_URL = (
     "https://jira.skatelescope.org/servicedesk/customer/portal/859/create/3944"
 )
@@ -87,9 +81,11 @@ def show_helpdesk_table(description: str, steps: str = "") -> None:
     """
     md = helpdesk_table_md(description, steps)
     try:
-        if display is None:
+        import sys as _sys
+        _ipd = _sys.modules.get("IPython.display")
+        if _ipd is None:
             raise ImportError
-        display(Markdown(md))
+        _ipd.display(_ipd.Markdown(md))
     except Exception:
         print(md)
 
