@@ -18,6 +18,17 @@ Usage::
 """
 from __future__ import annotations
 
+try:
+    from . import _env_urls
+except Exception:
+    _env_urls = None  # type: ignore[assignment]
+
+try:
+    from IPython.display import display, Markdown  # type: ignore[assignment]
+except Exception:
+    display = None  # type: ignore[assignment]
+    Markdown = None  # type: ignore[assignment]
+
 HELPDESK_URL = (
     "https://jira.skatelescope.org/servicedesk/customer/portal/859/create/3944"
 )
@@ -26,7 +37,6 @@ HELPDESK_URL = (
 def _env_cell() -> str:
     """Return a one-line string of all SRCNet service URLs for the current environment."""
     try:
-        from . import _env_urls
         urls = _env_urls()
     except Exception:
         return "*(see SRCNet environment config)*"
@@ -77,7 +87,8 @@ def show_helpdesk_table(description: str, steps: str = "") -> None:
     """
     md = helpdesk_table_md(description, steps)
     try:
-        from IPython.display import display, Markdown  # type: ignore
+        if display is None:
+            raise ImportError
         display(Markdown(md))
     except Exception:
         print(md)

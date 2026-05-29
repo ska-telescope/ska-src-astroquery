@@ -324,6 +324,14 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         """
         return self._data_access
 
+    def get_metadata(self, namespace, name):
+        """Convenience proxy — delegates to :meth:`~DataAccessClass.get_metadata`."""
+        return self._data_access.get_metadata(namespace, name)
+
+    def soda_cutout(self, namespace, name, output_file=None, **kwargs):
+        """Convenience proxy — delegates to :meth:`~DataAccessClass.soda_cutout`."""
+        return self._data_access.soda_cutout(namespace, name, output_file, **kwargs)
+
     def get_chat(self, chatserver_url: str = None, **kwargs):
         """Return a SRCNetChat configured for the current environment.
 
