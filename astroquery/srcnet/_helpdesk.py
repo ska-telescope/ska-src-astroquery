@@ -23,6 +23,12 @@ try:
 except Exception:
     _env_urls = None  # type: ignore[assignment]
 
+# Kept at module level so tests can patch astroquery.srcnet._helpdesk.display.
+try:
+    from IPython.display import display  # type: ignore[assignment]  # noqa: F401
+except Exception:
+    display = None  # type: ignore[assignment]
+
 HELPDESK_URL = (
     "https://jira.skatelescope.org/servicedesk/customer/portal/859/create/3944"
 )
