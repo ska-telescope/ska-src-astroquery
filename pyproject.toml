@@ -84,6 +84,7 @@ filterwarnings = [
     "ignore:unclosed <socket.socket:ResourceWarning",
     "ignore:unclosed <ssl.SSLSocket:ResourceWarning",
     "ignore:numpy.core:DeprecationWarning",
+    "ignore::astropy.utils.exceptions.AstropyPendingDeprecationWarning",
 ]
 markers = [
     "bigdata: marks tests that trigger large downloads",
