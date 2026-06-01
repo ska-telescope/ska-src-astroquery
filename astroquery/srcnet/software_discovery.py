@@ -471,8 +471,11 @@ class SoftwareDiscoveryClass:
         from . import conf
         cs_url = chatserver_url or conf.SRCNET_CHATSERVER_URL or None
 
+        # Always prefix with the SDM schema hint so the chatserver classifier
+        # reliably routes to software_query rather than answering conversationally.
         explicit = _detect_tables(text, {'sdm'})
-        msg = (f"[explicit_tables: {', '.join(explicit)}] " + text) if explicit else text
+        tables = list(explicit) if explicit else ["sdm.software"]
+        msg = f"[explicit_tables: {', '.join(tables)}] {text}"
 
         if cs_url:
             try:
@@ -492,14 +495,13 @@ class SoftwareDiscoveryClass:
 
         from . import _env_urls
         ollama_url = _env_urls()["chat"]
-        model = model or "deepseek-coder-v2"
         # Use replace() instead of .format() — the schema block may contain
         # literal curly braces (e.g. JSON examples) that would raise KeyError.
         prompt = _NL_TO_ADQL_PROMPT.replace("{question}", text)
         try:
             resp = requests.post(
                 f"{ollama_url.rstrip('/')}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False},
+                json={"model": model or "deepseek-coder-v2", "prompt": prompt, "stream": False},
                 timeout=120,
             )
             resp.raise_for_status()
