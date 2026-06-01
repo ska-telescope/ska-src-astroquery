@@ -330,9 +330,85 @@ class SoftwareDiscoveryClass:
         Returns
         -------
         `~astropy.table.Table`
-            Zero or one rows.
+            Zero or one rows from ``sdm.software`` only.
+            Use :meth:`get_software_full` to include artifacts and categories.
         """
         return self.query_software(uri=uri, maxrec=1)
+
+    def get_software_full(self, uri: str) -> dict:
+        """
+        Retrieve all available information for a single software entry.
+
+        Runs one query per sub-table to avoid row duplication from 1:N JOINs.
+
+        Parameters
+        ----------
+        uri : str
+            Full SKA software URI, e.g.
+            ``"ska:sextractor:docker-sextractor@2.25.0"``.
+
+        Returns
+        -------
+        dict
+            Keys: ``software``, ``artifacts``, ``requirements``,
+            ``science_categories``, ``function_categories``, ``working_groups``.
+            Each value is an `~astropy.table.Table`.
+
+        Examples
+        --------
+        >>> profile = sd.get_software_full("ska:sextractor:docker-sextractor@2.25.0")
+        >>> profile["software"]
+        >>> profile["artifacts"]
+        """
+        esc_uri = _esc(uri)
+
+        software = self.query(
+            f"SELECT * FROM sdm.software AS s WHERE s.uri = '{esc_uri}'",
+            maxrec=1,
+        )
+        artifacts = self.query(
+            f"SELECT a.kind, a.location, a.cpu_architecture"
+            f" FROM sdm.artifact AS a"
+            f" JOIN sdm.software AS s ON a.software_id = s.id"
+            f" WHERE s.uri = '{esc_uri}'"
+        )
+        requirements = self.query(
+            f"SELECT r.requires_gpu, r.min_memory, r.recommended_memory, r.min_cpu_cores"
+            f" FROM sdm.resource_requirements AS r"
+            f" JOIN sdm.software AS s ON r.software_id = s.id"
+            f" WHERE s.uri = '{esc_uri}'",
+            maxrec=1,
+        )
+        science_categories = self.query(
+            f"SELECT DISTINCT dsc.category"
+            f" FROM sdm.discovery_science_category AS dsc"
+            f" JOIN sdm.discovery AS d ON dsc.discovery_id = d.id"
+            f" JOIN sdm.software AS s ON d.software_id = s.id"
+            f" WHERE s.uri = '{esc_uri}'"
+        )
+        function_categories = self.query(
+            f"SELECT DISTINCT dfc.category"
+            f" FROM sdm.discovery_function_category AS dfc"
+            f" JOIN sdm.discovery AS d ON dfc.discovery_id = d.id"
+            f" JOIN sdm.software AS s ON d.software_id = s.id"
+            f" WHERE s.uri = '{esc_uri}'"
+        )
+        working_groups = self.query(
+            f"SELECT DISTINCT dswg.working_group"
+            f" FROM sdm.discovery_science_working_group AS dswg"
+            f" JOIN sdm.discovery AS d ON dswg.discovery_id = d.id"
+            f" JOIN sdm.software AS s ON d.software_id = s.id"
+            f" WHERE s.uri = '{esc_uri}'"
+        )
+
+        return {
+            "software":           software,
+            "artifacts":          artifacts,
+            "requirements":       requirements,
+            "science_categories": science_categories,
+            "function_categories": function_categories,
+            "working_groups":     working_groups,
+        }
 
     def query_by_image(self, image: str) -> Table:
         """

@@ -263,6 +263,74 @@ class TestGetSoftware:
         mock_qs.assert_called_once_with(uri="ska:foo:1.0", maxrec=1)
 
 
+class TestGetSoftwareFull:
+    """get_software_full() — full profile across all sub-tables."""
+
+    @pytest.fixture
+    def sd_full(self):
+        """SoftwareDiscoveryClass whose query() returns distinct per-call Tables."""
+        obj = SoftwareDiscoveryClass(tap_url="http://mock-tap/")
+        return obj
+
+    def _make_table(self, col: str, value: str) -> Table:
+        return Table({col: [value]})
+
+    def test_returns_dict_with_expected_keys(self, sd_full):
+        with patch.object(sd_full, "query", return_value=Table({"uri": ["ska:foo:1.0"]})):
+            result = sd_full.get_software_full("ska:foo:1.0")
+
+        assert set(result) == {
+            "software", "artifacts", "requirements",
+            "science_categories", "function_categories", "working_groups",
+        }
+
+    def test_all_values_are_tables(self, sd_full):
+        with patch.object(sd_full, "query", return_value=Table({"col": ["v"]})):
+            result = sd_full.get_software_full("ska:foo:1.0")
+
+        for key, val in result.items():
+            assert isinstance(val, Table), f"{key} is not a Table"
+
+    def test_runs_six_queries(self, sd_full):
+        with patch.object(sd_full, "query", return_value=Table({"col": ["v"]})) as mock_q:
+            sd_full.get_software_full("ska:foo:1.0")
+        assert mock_q.call_count == 6
+
+    def test_software_query_uses_uri_filter(self, sd_full):
+        calls = []
+        def capture(adql, **kwargs):
+            calls.append(adql)
+            return Table({"col": ["v"]})
+
+        with patch.object(sd_full, "query", side_effect=capture):
+            sd_full.get_software_full("ska:wsclean:2.0")
+
+        assert any("ska:wsclean:2.0" in c and "sdm.software" in c for c in calls)
+
+    def test_artifacts_query_joins_artifact_table(self, sd_full):
+        calls = []
+        def capture(adql, **kwargs):
+            calls.append(adql)
+            return Table({"col": ["v"]})
+
+        with patch.object(sd_full, "query", side_effect=capture):
+            sd_full.get_software_full("ska:foo:1.0")
+
+        assert any("sdm.artifact" in c for c in calls)
+
+    def test_uri_value_is_escaped(self, sd_full):
+        calls = []
+        def capture(adql, **kwargs):
+            calls.append(adql)
+            return Table({"col": ["v"]})
+
+        with patch.object(sd_full, "query", side_effect=capture):
+            sd_full.get_software_full("ska:bad'uri:1.0")
+
+        # Single quote must be doubled in every query
+        assert all("bad''uri" in c for c in calls)
+
+
 class TestQueryByImage:
     """query_by_image() — artifact location substring search."""
 
