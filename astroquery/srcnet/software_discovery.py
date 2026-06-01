@@ -367,13 +367,13 @@ class SoftwareDiscoveryClass:
             maxrec=1,
         )
         artifacts = self.query(
-            f"SELECT a.kind, a.location, a.cpu_architecture"
+            f"SELECT a.*"
             f" FROM sdm.artifact AS a"
             f" JOIN sdm.software AS s ON a.software_id = s.id"
             f" WHERE s.uri = '{esc_uri}'"
         )
         requirements = self.query(
-            f"SELECT r.requires_gpu, r.min_memory, r.recommended_memory, r.min_cpu_cores"
+            f"SELECT r.*"
             f" FROM sdm.resource_requirements AS r"
             f" JOIN sdm.software AS s ON r.software_id = s.id"
             f" WHERE s.uri = '{esc_uri}'",
