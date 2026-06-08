@@ -39,6 +39,7 @@ Switch environment::
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from typing import Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
@@ -47,6 +48,8 @@ import requests
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 import astropy.units as u
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ._helpdesk import srcnet_raise
 
@@ -148,6 +151,7 @@ class DataDiscoveryClass:
             if self._token:
                 session.headers["Authorization"] = f"Bearer {self._token}"
             _patch_redirect_session(session, self._tap_url)
+            _mount_retries(session)
         return self._tap
 
     # ── Schema introspection ──────────────────────────────────────────────────
@@ -161,11 +165,13 @@ class DataDiscoveryClass:
         `~astropy.table.Table`
             Columns: ``name``, ``description``.
         """
-        tables = self.tap.tables
-        rows = [
-            {"name": t.name, "description": t.description or ""}
-            for t in tables.values()
-        ]
+        # One request to the VOSI tableset, parsed directly — avoids pyvo's
+        # per-table detail fetches (one request per table), which multiply the
+        # chance of hitting a flaky TAP ingress. The retry-mounted session
+        # handles transient connection drops on this single request.
+        resp = self.tap._session.get(f"{self._tap_url}/tables")
+        resp.raise_for_status()
+        rows = _parse_tableset(resp.content)
         return Table(rows=rows) if rows else Table(names=["name", "description"])
 
     def get_columns(self, table: str) -> Table:
@@ -608,6 +614,51 @@ class DataDiscoveryClass:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_tableset(content: bytes) -> list:
+    """Parse a VOSI tableset XML into ``[{"name", "description"}]``.
+
+    Namespace-agnostic (matches on local tag names) so it works regardless of the
+    VODataService namespace prefix the service uses.
+    """
+    rows: list = []
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return rows
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] != "table":
+            continue
+        name = desc = ""
+        for child in el:
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "name":
+                name = (child.text or "").strip()
+            elif tag == "description":
+                desc = (child.text or "").strip()
+        if name:
+            rows.append({"name": name, "description": desc})
+    return rows
+
+
+def _mount_retries(session: requests.Session) -> None:
+    """Retry transient connection failures and 5xx responses on *session*.
+
+    TAP ingresses (especially preprod) occasionally reset the TLS handshake
+    (``SSL: UNEXPECTED_EOF_WHILE_READING``) or return a 5xx. ``connect`` retries
+    cover the TLS resets; ``backoff_factor`` adds exponential spacing so a flaky
+    ingress doesn't fail a query outright.
+    """
+    retry = Retry(
+        total=6, connect=6, read=6, backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
 
 def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
     """Rewrite localhost redirect URLs to the public TAP hostname.

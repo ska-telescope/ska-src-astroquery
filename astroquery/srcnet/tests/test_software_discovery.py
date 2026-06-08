@@ -20,8 +20,32 @@ from astroquery.srcnet.software_discovery import (
     _esc,
     _extract_adql,
     _fix_adql,
+    _mount_retries,
+    _parse_tableset,
     _patch_redirect_session,
 )
+
+
+class TestTablesetAndRetries:
+    """_parse_tableset() and _mount_retries() — robustness helpers."""
+
+    def test_parse_tableset_extracts_name_and_description(self):
+        xml = (b'<vosi:tableset xmlns:vosi="http://x"><schema>'
+               b'<table><name>sdm.a</name><description>A</description></table>'
+               b'<table><name>sdm.b</name></table></schema></vosi:tableset>')
+        rows = _parse_tableset(xml)
+        assert {r["name"] for r in rows} == {"sdm.a", "sdm.b"}
+        assert dict((r["name"], r["description"]) for r in rows)["sdm.a"] == "A"
+
+    def test_parse_tableset_bad_xml_returns_empty(self):
+        assert _parse_tableset(b"not xml at all") == []
+
+    def test_mount_retries_configures_connect_retries(self):
+        s = requests.Session()
+        _mount_retries(s)
+        retries = s.get_adapter("https://example.org").max_retries
+        assert retries.connect and retries.connect >= 1
+        assert retries.total and retries.total >= 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,19 +371,32 @@ class TestQueryByImage:
 
 
 class TestGetTables:
-    """get_tables() — schema introspection."""
+    """get_tables() — schema introspection via a single VOSI tableset request."""
+
+    _TABLESET = (
+        b'<vosi:tableset xmlns:vosi="http://www.ivoa.net/xml/VOSITables/v1.0">'
+        b'<schema><name>sdm</name>'
+        b'<table><name>sdm.software</name><description>Software entries</description></table>'
+        b'</schema></vosi:tableset>'
+    )
+
+    def _resp(self, content):
+        r = MagicMock()
+        r.content = content
+        r.raise_for_status.return_value = None
+        return r
 
     def test_returns_astropy_table(self, sd):
-        mock_table_obj = MagicMock()
-        mock_table_obj.name = "sdm.software"
-        mock_table_obj.description = "Software entries"
-        sd._tap.tables = {"sdm.software": mock_table_obj}
+        sd._tap._session.get.return_value = self._resp(self._TABLESET)
         result = sd.get_tables()
         assert isinstance(result, Table)
         assert "sdm.software" in list(result["name"])
+        assert "Software entries" in list(result["description"])
 
     def test_empty_service_returns_empty_table(self, sd):
-        sd._tap.tables = {}
+        sd._tap._session.get.return_value = self._resp(
+            b'<vosi:tableset xmlns:vosi="http://www.ivoa.net/xml/VOSITables/v1.0"/>'
+        )
         result = sd.get_tables()
         assert len(result) == 0
 
