@@ -25,6 +25,18 @@ ENVIRONMENTS = {
         "software_tap":    "https://software-discovery.ral-preprod.uksrc.org/tap/",
         "chat":            "https://chat.srcdev.skao.int",
     },
+    "local": {
+        # Services run locally for development, but authentication goes through the
+        # dev SRCNet auth API (backed by ska-iam) so login() + token exchange
+        # behave exactly as in preprod/production — no special-casing for local.
+        "authn_api":       "https://authn.srcdev.skao.int/api/v1",
+        "dm_api":          "http://localhost:8089/api/v1",
+        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":    "http://localhost:8080/tap/",
+        "chat":            "https://chat.srcdev.skao.int",
+    },
 }
 
 _DEFAULT_ENV = "production"
@@ -39,6 +51,7 @@ class Conf(_config.ConfigNamespace):
         'SRCNet deployment environment. '
         '"production" (default) — live SRCNet services. '
         '"preprod" — pre-production / staging services. '
+        '"local" — services on localhost, authenticated against the dev IAM. '
         'All service URLs are derived from this setting.'
     )
     SRCNET_SOFTWARE_DISCOVERY_TAP_URL = _config.ConfigItem(
