@@ -17,7 +17,9 @@ ENVIRONMENTS = {
         "chat":            "https://chat.srcnet.skao.int",
     },
     "preprod": {
-        "authn_api":       "https://authn.srcdev.skao.int/api/v1",
+        # Dev authn host authn.srcdev.skao.int is decommissioned; the single SKA
+        # IAM (ska-iam.stfc.ac.uk) is fronted by the live authn.srcnet.skao.int.
+        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
         "dm_api":          "https://data-management.srcdev.skao.int/api/v1",
         "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
         "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
