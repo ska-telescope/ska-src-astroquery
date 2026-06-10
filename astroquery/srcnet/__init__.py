@@ -27,9 +27,11 @@ ENVIRONMENTS = {
     },
     "local": {
         # Services run locally for development, but authentication goes through the
-        # dev SRCNet auth API (backed by ska-iam) so login() + token exchange
-        # behave exactly as in preprod/production — no special-casing for local.
-        "authn_api":       "https://authn.srcdev.skao.int/api/v1",
+        # live SRCNet auth API (backed by ska-iam.stfc.ac.uk) so login() + token
+        # exchange behave exactly as in production — no special-casing for local.
+        # (The old dev host authn.srcdev.skao.int is decommissioned; the single
+        # SKA IAM ska-iam.stfc.ac.uk is fronted by authn.srcnet.skao.int.)
+        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
         "dm_api":          "http://localhost:8089/api/v1",
         "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
         "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
