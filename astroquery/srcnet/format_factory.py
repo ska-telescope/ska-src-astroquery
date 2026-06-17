@@ -82,6 +82,7 @@ class Image(SKAProduct):
 
     @staticmethod
     def list_methods():
+        """Return the names of the operations supported by this product type."""
         return ["cutout",
                 "show_metadata",
                 "fits_header_info (placeholder)"
@@ -109,6 +110,7 @@ class Cube(SKAProduct):
 
     @staticmethod
     def list_methods():
+        """Return the names of the operations supported by this product type."""
         return ["subcube",
                 "show_metadata",
                 "fits_header_info (placeholder)"
@@ -135,6 +137,7 @@ class Spectra(SKAProduct):
 
     @staticmethod
     def list_methods():
+        """Return the names of the operations supported by this product type."""
         return ["show_metadata",
                 "fit_gaussian (placeholder)"
         ]
@@ -149,6 +152,7 @@ class Visibility(SKAProduct):
 
     @staticmethod
     def list_methods():
+        """Return the names of the operations supported by this product type."""
         return ["show_metadata",
                 "plot_uv_coverage (placeholder)"
         ]

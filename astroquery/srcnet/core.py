@@ -216,6 +216,16 @@ def refresh_token_if_expired(func):
 
 
 class SRCNetClass(BaseVOQuery, BaseQuery):
+    """Top-level SRCNet client — the entry point to the SRCNet services.
+
+    Selects a deployment by ``environment`` (``"production"`` / ``"preprod"``),
+    holds the OIDC access/refresh tokens (resolved from the constructor, the
+    ``ACCESS_TOKEN`` / ``REFRESH_TOKEN`` environment variables, then the persisted
+    token files, in that order) and an authorised ``requests`` session, and lazily
+    builds the sub-clients exposed by the factory methods:
+    :meth:`get_software_discovery` (software registry/TAP), :meth:`get_tap` (data
+    discovery / TAP), plus the chat assistant and data-access helpers.
+    """
 
     def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
                  refresh_token_path='/tmp/refresh_token', verbose=False, environment=None):
@@ -277,6 +287,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
     @property
     def access_token(self):
+        """The current OIDC access token; assigning a new one re-authorises the session."""
         return self._access_token
 
     @access_token.setter
@@ -286,6 +297,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
     @property
     def refresh_token(self):
+        """The current OIDC refresh token (used to mint a new access token)."""
         return self._refresh_token
 
     @refresh_token.setter

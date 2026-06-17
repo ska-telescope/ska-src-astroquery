@@ -354,6 +354,7 @@ class SRCNetChat:
     # ── Backend dispatch ──────────────────────────────────────────────────────
 
     def _run_loop(self) -> str:
+        """Run one chat turn against the configured backend (anthropic / chatserver / ollama)."""
         if self._backend == "anthropic":
             return self._run_loop_anthropic()
         if self._backend == "chatserver":
@@ -361,6 +362,11 @@ class SRCNetChat:
         return self._run_loop_ollama()
 
     def _run_loop_ollama(self) -> str:
+        """Chat turn via a local Ollama ``/api/chat``.
+
+        Tool calls are parsed out of the model's reply text and fed back into the
+        conversation, looping until the model returns a plain answer.
+        """
         messages = [{"role": "system", "content": self._system_prompt}]
         messages += [{"role": m["role"], "content": m["content"]} for m in self._history]
 
@@ -391,6 +397,12 @@ class SRCNetChat:
             })
 
     def _run_loop_chatserver(self) -> str:
+        """Chat turn via the SRCNet chat server (``POST /chat``).
+
+        The server keeps conversation history keyed by ``session_id``; any tool
+        call in the reply is dispatched here and its result sent back as a
+        follow-up message in the same session.
+        """
         # CHATSERVER API: POST /chat {"message": str, "session_id": str}
         # Returns: {"answer": str, "category": str, "session_id": str}
         # Server maintains conversation history keyed by session_id.
@@ -459,7 +471,11 @@ class SRCNetChat:
         return full_text
 
     def _run_loop_anthropic(self) -> str:
+        """Chat turn via the Anthropic Messages API with native tool use.
 
+        Loops on ``stop_reason == "tool_use"`` (dispatching each tool block and
+        returning the results) until the model finishes with ``end_turn``.
+        """
         messages = [
             {"role": m["role"], "content": m["content"]}
             for m in self._history
@@ -503,6 +519,7 @@ class SRCNetChat:
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
     def _dispatch(self, name: str, args: dict) -> str:
+        """Route a parsed tool call (``run_adql`` / ``get_schema``) to its handler."""
         if name == "run_adql":
             return self._tool_run_adql(args.get("adql", ""), args.get("maxrec"))
         if name == "get_schema":
@@ -510,6 +527,12 @@ class SRCNetChat:
         return f"Unknown tool: {name}"
 
     def _tool_run_adql(self, adql: str, maxrec: Optional[int]) -> str:
+        """Tool: run *adql* against the software-discovery TAP service.
+
+        Returns a row count plus a text rendering of the table, and caches the
+        result on ``self._last_table``. Errors are returned as text so the model
+        can react rather than crashing the loop.
+        """
         if self._verbose:
             print(f"[ADQL] {adql}")
         try:
@@ -520,6 +543,7 @@ class SRCNetChat:
             return f"Query error: {exc}"
 
     def _tool_get_schema(self) -> str:
+        """Tool: return the ``sdm.software`` column definitions as a text table."""
         try:
             cols = self._sd.get_columns()
             return f"Columns in sdm.software:\n\n{_table_to_text(cols, max_rows=50)}"
