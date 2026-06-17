@@ -85,6 +85,7 @@ filterwarnings = [
     "ignore:unclosed <ssl.SSLSocket:ResourceWarning",
     "ignore:numpy.core:DeprecationWarning",
     "ignore::astropy.utils.exceptions.AstropyPendingDeprecationWarning",
+    "ignore:The TestRunner class is deprecated:astropy.utils.exceptions.AstropyDeprecationWarning",
 ]
 markers = [
     "bigdata: marks tests that trigger large downloads",
