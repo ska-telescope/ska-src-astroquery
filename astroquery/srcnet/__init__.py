@@ -1,42 +1,120 @@
 from astropy import config as _config
 
 
+# ── Environment definitions ───────────────────────────────────────────────────
+
+#: Entry-point URLs for each SRCNet deployment environment.
+#: Switch via ``conf.SRCNET_ENVIRONMENT`` or by setting the
+#: ``SRCNET_ENVIRONMENT`` config item.
+ENVIRONMENTS = {
+    "production": {
+        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
+        "dm_api":          "https://data-management.srcnet.skao.int/api/v1",
+        "tap":             "https://science-metadata.srcnet.skao.int/argus/",
+        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":        "https://datalink.ivoa.srcnet.skao.int/rucio/links",
+        "software_tap":    "https://software-discovery.srcnet.skao.int/tap/",
+        "chat":            "https://chat.srcnet.skao.int",
+    },
+    "preprod": {
+        # Dev authn host authn.srcdev.skao.int is decommissioned; the single SKA
+        # IAM (ska-iam.stfc.ac.uk) is fronted by the live authn.srcnet.skao.int.
+        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
+        "dm_api":          "https://data-management.srcdev.skao.int/api/v1",
+        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":    "https://software-discovery.ral-preprod.uksrc.org/tap/",
+        "chat":            "https://chat.srcdev.skao.int",
+    },
+    "local": {
+        # Services run locally for development, but authentication goes through the
+        # live SRCNet auth API (backed by ska-iam.stfc.ac.uk) so login() + token
+        # exchange behave exactly as in production — no special-casing for local.
+        # (The old dev host authn.srcdev.skao.int is decommissioned; the single
+        # SKA IAM ska-iam.stfc.ac.uk is fronted by authn.srcnet.skao.int.)
+        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
+        "dm_api":          "http://localhost:8089/api/v1",
+        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":    "http://localhost:8080/tap/",
+        "chat":            "https://chat.srcdev.skao.int",
+    },
+}
+
+_DEFAULT_ENV = "production"
+
+
 class Conf(_config.ConfigNamespace):
     """
     Configuration parameters for `astroquery.srcnet`.
     """
-    SRCNET_AUTHN_API_ADDRESS = _config.ConfigItem(
-        'https://authn.srcdev.skao.int/api/v1',
-        'Base address of the SRCNet AuthN API'
-        )
-    SRCNET_DM_API_ADDRESS = _config.ConfigItem(
-        'https://data-management.srcdev.skao.int/api/v1',
-        'Base address of the SRCNet Data Management API'
-        )
-    SRCNET_TAP_SERVICE_URL_BASE = _config.ConfigItem(
-        'https://dachs.ivoa.srcnet.skao.int/__system__/tap/run',
-        'SRCNet TAP service URL'
+    SRCNET_ENVIRONMENT = _config.ConfigItem(
+        _DEFAULT_ENV,
+        'SRCNet deployment environment. '
+        '"production" (default) — live SRCNet services. '
+        '"preprod" — pre-production / staging services. '
+        '"local" — services on localhost, authenticated against the dev IAM. '
+        'All service URLs are derived from this setting.'
     )
-    SRCNET_DATALINK_SERVICE_URL = _config.ConfigItem(
-        'https://datalink.ivoa.srcnet.skao.int/rucio/links',
-        'SRCNET Datalink service URL'
+    SRCNET_SOFTWARE_DISCOVERY_TAP_URL = _config.ConfigItem(
+        '',
+        'Override URL for the Software Discovery TAP service. '
+        'Empty = use the URL for the configured SRCNET_ENVIRONMENT.'
     )
-    SRCNET_IVOA_OBSCORE_TABLE_NAME = _config.ConfigItem(
-        'ivoa.obscore',
-        'ObsCore table name'
+    SRCNET_DATA_DISCOVERY_TAP_URL = _config.ConfigItem(
+        '',
+        'Override URL for the Data Discovery (CAOM2) TAP service. '
+        'Empty = use the URL for the configured SRCNET_ENVIRONMENT.'
     )
-    SRCNET_IVOA_OBSCORE_RA_COL_NAME = _config.ConfigItem(
-        'S_ra',
-        'RA column name in IVOA ObsCore table'
+    SRCNET_OLLAMA_URL = _config.ConfigItem(
+        'http://localhost:11434',
+        'Base URL for the local Ollama instance used by nl_to_adql().'
     )
-    SRCNET_IVOA_OBSCORE_DEC_COL_NAME = _config.ConfigItem(
-        'S_dec',
-        'DEC column name in IVOA ObsCore table'
+    SRCNET_OLLAMA_MODEL = _config.ConfigItem(
+        'deepseek-coder-v2',
+        'Default Ollama model for nl_to_adql().'
     )
+    SRCNET_CHATSERVER_URL = _config.ConfigItem(
+        '',
+        'CHATSERVER REST API base URL. Empty = use direct Ollama instead.'
+    )
+    SRCNET_DEFAULT_MAXREC = _config.ConfigItem(
+        2000,
+        'Default maximum number of rows returned per query.'
+    )
+    SRCNET_QUERY_TIMEOUT = _config.ConfigItem(
+        60,
+        'Synchronous query timeout in seconds.'
+    )
+
 
 conf = Conf()
 
+
+def _env_urls():
+    """Return the URL dict for the currently configured environment."""
+    return ENVIRONMENTS.get(conf.SRCNET_ENVIRONMENT, ENVIRONMENTS[_DEFAULT_ENV])
+
+
 from .core import SRCNet, SRCNetClass
 from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
+from .software_discovery import SoftwareDiscovery, SoftwareDiscoveryClass
+from .data_discovery import DataDiscovery, DataDiscoveryClass
+from .data_access import DataAccessClass
+from .chat import SRCNetChat
 
-__all__ = ['SRCNet', 'SRCNetClass', 'conf', 'SKAFormatFactory', 'Cube', 'Image', 'Spectra', 'Visibility']
+#: Module-level DataAccess singleton — wraps the default SRCNet instance.
+#: Requires :func:`SRCNet.login` before calling data-access methods.
+DataAccess = SRCNet.get_data_access()
+
+__all__ = [
+    'SRCNet', 'SRCNetClass',
+    'conf', 'ENVIRONMENTS',
+    'SKAFormatFactory', 'Cube', 'Image', 'Spectra', 'Visibility',
+    'SoftwareDiscovery', 'SoftwareDiscoveryClass',
+    'DataDiscovery', 'DataDiscoveryClass',
+    'DataAccess', 'DataAccessClass',
+    'SRCNetChat',
+]

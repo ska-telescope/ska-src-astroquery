@@ -1,0 +1,3 @@
+# CODEOWNERS — default owners/reviewers for ska-src-astroquery.
+# https://docs.gitlab.com/ee/user/project/codeowners/
+* @jesus.salgado @robbarnsley
