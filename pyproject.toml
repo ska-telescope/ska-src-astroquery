@@ -71,6 +71,10 @@ include = ["astroquery*"]
 [tool.setuptools_scm]
 # fallback when no git tag is reachable (e.g. CI on untagged branch)
 fallback_version = "0.0.0.dev0"
+# Write the resolved version to astroquery/version.py at build time. astroquery's
+# query.py imports this module directly (`from astroquery import version`), so
+# without it every `pip install` produces a package that fails to import.
+version_file = "astroquery/version.py"
 
 # ── Tool config (migrated from setup.cfg) ────────────────────────────────────
 
