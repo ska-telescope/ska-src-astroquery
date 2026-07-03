@@ -28,12 +28,13 @@ ENVIRONMENTS = {
         "chat":            "https://chat.srcdev.skao.int",
     },
     "local": {
-        # Services run locally for development, but authentication goes through the
-        # live SRCNet auth API (backed by ska-iam.stfc.ac.uk) so login() + token
-        # exchange behave exactly as in production — no special-casing for local.
-        # (The old dev host authn.srcdev.skao.int is decommissioned; the single
-        # SKA IAM ska-iam.stfc.ac.uk is fronted by authn.srcnet.skao.int.)
-        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
+        # Services run locally for development, including authentication: authn_api
+        # points at the dev mock IAM from the ska-src-software-registration
+        # `start-app.sh local auth` stack, so SRCNet.login() (device flow) yields a
+        # token the local Permissions API validates — including the operator group
+        # needed to exercise write authorisation, which a real SKA-IAM identity may
+        # not carry. Override authn_api if you want live-IAM auth against localhost.
+        "authn_api":       "http://localhost:8079",
         "dm_api":          "http://localhost:8089/api/v1",
         "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
         "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
