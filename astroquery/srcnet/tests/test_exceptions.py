@@ -11,6 +11,7 @@ import requests
 from unittest.mock import MagicMock, patch
 
 from astroquery.srcnet.exceptions import (
+    CreditExceeded,
     CustomException,
     NoAccessTokenFoundInResponse,
     QueryRegionSearchAreaAmbiguous,
@@ -50,6 +51,13 @@ class TestCustomExceptions:
         exc = UnsupportedOIDCFlow("client_credentials")
         assert "client_credentials" in exc.message
 
+    def test_credit_exceeded_includes_broker_detail(self):
+        # The broker's own 402 detail text (project name + budget numbers) must
+        # survive unchanged so it stays useful to whoever reads exc.message.
+        exc = CreditExceeded("project 'Survey' is over its credit budget (154/120 credits)")
+        assert "Survey" in exc.message
+        assert "154/120" in exc.message
+
     def test_all_subclass_custom_exception(self):
         # handle_exceptions catches CustomException; all domain errors must inherit it.
         for cls in (
@@ -57,6 +65,7 @@ class TestCustomExceptions:
             QueryRegionSearchAreaUndefined,
             QueryRegionSearchAreaAmbiguous,
             UnsupportedOIDCFlow,
+            CreditExceeded,
         ):
             assert issubclass(cls, CustomException), f"{cls} must subclass CustomException"
 

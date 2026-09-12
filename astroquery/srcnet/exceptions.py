@@ -12,7 +12,8 @@ Exception hierarchy
   ├── ``QueryRegionSearchAreaUndefined``
   ├── ``QueryRegionSearchAreaAmbiguous``
   ├── ``UnsupportedAccessProtocol``
-  └── ``UnsupportedOIDCFlow``
+  ├── ``UnsupportedOIDCFlow``
+  └── ``CreditExceeded``
 """
 import requests
 import traceback
@@ -113,4 +114,21 @@ class UnsupportedOIDCFlow(CustomException):
 
     def __init__(self, oidc_flow):
         self.message = "The {} flow is not supported".format(oidc_flow)
+        super().__init__(self.message)
+
+
+class CreditExceeded(CustomException):
+    """Raised when the computing broker refuses a job at admission time
+    because the owning project has no remaining credit budget.
+
+    Mirrors the computing broker's ``POST /v1/jobs`` → ``402 Payment
+    Required`` response (see ``ska-src-ef-computing-broker``'s AQS credit
+    gate): the broker has already checked ``GET /v1/accounts/{project}``
+    on the central Accounting & Quota Service and the project is over
+    budget. *detail* is the broker's own error text, passed through
+    unchanged so it still names the project and the budget numbers.
+    """
+
+    def __init__(self, detail):
+        self.message = "Job rejected by the credit gate: {detail}".format(detail=detail)
         super().__init__(self.message)

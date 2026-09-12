@@ -8,24 +8,31 @@ from astropy import config as _config
 #: ``SRCNET_ENVIRONMENT`` config item.
 ENVIRONMENTS = {
     "production": {
-        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
-        "dm_api":          "https://data-management.srcnet.skao.int/api/v1",
-        "tap":             "https://science-metadata.srcnet.skao.int/argus/",
-        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
-        "datalink":        "https://datalink.ivoa.srcnet.skao.int/rucio/links",
-        "software_tap":    "https://software-discovery.srcnet.skao.int/tap/",
-        "chat":            "https://chat.srcnet.skao.int",
+        "authn_api":        "https://authn.srcnet.skao.int/api/v1",
+        "dm_api":           "https://data-management.srcnet.skao.int/api/v1",
+        "tap":              "https://science-metadata.srcnet.skao.int/argus/",
+        "data_access_tap":  "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":         "https://datalink.ivoa.srcnet.skao.int/rucio/links",
+        "software_tap":     "https://software-discovery.srcnet.skao.int/tap/",
+        "chat":             "https://chat.srcnet.skao.int",
+        # Not deployed yet (the computing broker's AQS credit gate and the
+        # accounting service itself are both still pre-production — see
+        # ska-src-ef-computing-broker MR !56 / ska-src-accounting-quota-api).
+        # Placeholder hostname, following this table's own naming convention.
+        "computing_broker": "https://computing-broker.srcnet.skao.int",
     },
     "preprod": {
         # Dev authn host authn.srcdev.skao.int is decommissioned; the single SKA
         # IAM (ska-iam.stfc.ac.uk) is fronted by the live authn.srcnet.skao.int.
-        "authn_api":       "https://authn.srcnet.skao.int/api/v1",
-        "dm_api":          "https://data-management.srcdev.skao.int/api/v1",
-        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
-        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
-        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
-        "software_tap":    "https://software-discovery.ral-preprod.uksrc.org/tap/",
-        "chat":            "https://chat.srcdev.skao.int",
+        "authn_api":        "https://authn.srcnet.skao.int/api/v1",
+        "dm_api":           "https://data-management.srcdev.skao.int/api/v1",
+        "tap":              "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap":  "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":         "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":     "https://software-discovery.ral-preprod.uksrc.org/tap/",
+        "chat":             "https://chat.srcdev.skao.int",
+        # Not deployed yet — see the "production" comment above.
+        "computing_broker": "https://computing-broker.srcdev.skao.int",
     },
     "local": {
         # Services run locally for development, including authentication: authn_api
@@ -34,13 +41,17 @@ ENVIRONMENTS = {
         # token the local Permissions API validates — including the operator group
         # needed to exercise write authorisation, which a real SKA-IAM identity may
         # not carry. Override authn_api if you want live-IAM auth against localhost.
-        "authn_api":       "http://localhost:8079",
-        "dm_api":          "http://localhost:8089/api/v1",
-        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
-        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
-        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
-        "software_tap":    "http://localhost:8080/tap/",
-        "chat":            "https://chat.srcdev.skao.int",
+        "authn_api":        "http://localhost:8079",
+        "dm_api":           "http://localhost:8089/api/v1",
+        "tap":              "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap":  "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":         "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":     "http://localhost:8080/tap/",
+        "chat":             "https://chat.srcdev.skao.int",
+        # Matches ska-src-accounting-quota-api's docs/broker-credit-check.md
+        # "Try it yourself" runbook, which runs a local broker (gate wired to
+        # a local AQS on :8100) on exactly this port.
+        "computing_broker": "http://localhost:8083",
     },
 }
 
@@ -104,11 +115,16 @@ from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
 from .software_discovery import SoftwareDiscovery, SoftwareDiscoveryClass
 from .data_discovery import DataDiscovery, DataDiscoveryClass
 from .data_access import DataAccessClass
+from .federated_execution import FederatedExecutionClass
 from .chat import SRCNetChat
 
 #: Module-level DataAccess singleton — wraps the default SRCNet instance.
 #: Requires :func:`SRCNet.login` before calling data-access methods.
 DataAccess = SRCNet.get_data_access()
+
+#: Module-level FederatedExecution singleton — wraps the default SRCNet instance.
+#: Requires :func:`SRCNet.login` before calling execute()/get_job()/cancel_job().
+FederatedExecution = SRCNet.get_federated_execution()
 
 __all__ = [
     'SRCNet', 'SRCNetClass',
@@ -117,5 +133,6 @@ __all__ = [
     'SoftwareDiscovery', 'SoftwareDiscoveryClass',
     'DataDiscovery', 'DataDiscoveryClass',
     'DataAccess', 'DataAccessClass',
+    'FederatedExecution', 'FederatedExecutionClass',
     'SRCNetChat',
 ]

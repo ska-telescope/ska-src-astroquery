@@ -111,6 +111,30 @@ questions without repeating context.  Call SRCNet._chat.reset() to start fresh.
   da.soda_cutout("testing", "cube.fits", "output/subcube.fits",
                  circle=(83.8, -5.4, 0.5), band="0.0002 0.0003")
 
+─── Federated Execution — submit and track jobs via the computing broker ────
+
+  SRCNet.login()                            # OIDC device flow — required once
+  fe = SRCNet.get_federated_execution()     # FederatedExecutionClass
+
+  # Submit a job (a plain dict — the broker's JobSubmitRequest shape)
+  result = fe.execute({
+      "workflow_type": "snakemake",
+      "workflow_type_version": "7",
+      "workflow_engine_parameters": {"--cores": "1"},
+      "job_id": "my-job-0001",
+  })
+  print(result["state"])                    # e.g. "PENDING"
+
+  # Poll status
+  fe.get_job(result["job_id"])["state"]
+
+  # An over-budget project is refused at admission (broker 402) — inspect
+  # str(e), the same as every other error in this package:
+  try:
+      fe.execute(job)
+  except Exception as e:
+      print(e)                              # "...over its credit budget..."
+
 ─── Suppress display / use results programmatically ─────────────────────────
 
   t = SRCNet.chat(
@@ -224,7 +248,8 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
     token files, in that order) and an authorised ``requests`` session, and lazily
     builds the sub-clients exposed by the factory methods:
     :meth:`get_software_discovery` (software registry/TAP), :meth:`get_tap` (data
-    discovery / TAP), plus the chat assistant and data-access helpers.
+    discovery / TAP), :meth:`get_federated_execution` (job submission on the
+    federated compute pool), plus the chat assistant and data-access helpers.
     """
 
     def __init__(self, *args, access_token=None, refresh_token=None, access_token_path='/tmp/access_token',
@@ -243,6 +268,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         self.srcnet_dm_api_base_address    = urls["dm_api"]
         self.srcnet_data_access_tap_url    = urls["data_access_tap"]
         self.srcnet_datalink_service_url   = urls["datalink"]
+        self.srcnet_computing_broker_url   = urls["computing_broker"]
 
         self.session = requests.Session()
 
@@ -279,11 +305,13 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         from .software_discovery import SoftwareDiscoveryClass
         from .data_discovery import DataDiscoveryClass
         from .data_access import DataAccessClass
+        from .federated_execution import FederatedExecutionClass
         self._sd          = SoftwareDiscoveryClass(tap_url=urls["software_tap"])
         self._tap_client  = DataDiscoveryClass(tap_url=urls["tap"])
         self._chat        = SRCNetChat(self._sd, backend="chatserver",
                                        chatserver_url=urls["chat"])
         self._data_access = DataAccessClass(self)
+        self._federated_execution = FederatedExecutionClass(self)
 
     @property
     def access_token(self):
@@ -335,6 +363,37 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         ...                circle=(351.9867, 8.7787, 0.1))
         """
         return self._data_access
+
+    def get_federated_execution(self):
+        """Return a :class:`~astroquery.srcnet.FederatedExecutionClass` for this environment.
+
+        The returned object submits jobs to (and tracks them on) the SRCNet
+        federated compute pool, via the computing broker.  :meth:`login`
+        must be called before using any of these methods if the broker
+        requires authentication.
+
+        A job is refused at admission time — :meth:`FederatedExecutionClass.execute`
+        raises — if the owning project has no remaining credit budget on the
+        central Accounting & Quota Service; see
+        :class:`~astroquery.srcnet.exceptions.CreditExceeded`.
+
+        Returns
+        -------
+        :class:`~astroquery.srcnet.FederatedExecutionClass`
+
+        Examples
+        --------
+        >>> SRCNet.login()
+        >>> fe = SRCNet.get_federated_execution()
+        >>> result = fe.execute({
+        ...     "workflow_type": "snakemake",
+        ...     "workflow_type_version": "7",
+        ...     "workflow_engine_parameters": {"--cores": "1"},
+        ...     "job_id": "my-job-0001",
+        ... })
+        >>> fe.get_job(result["job_id"])["state"]
+        """
+        return self._federated_execution
 
     def get_metadata(self, namespace, name):
         """Convenience proxy — delegates to :meth:`~DataAccessClass.get_metadata`."""
