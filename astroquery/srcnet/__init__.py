@@ -115,7 +115,7 @@ from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
 from .software_discovery import SoftwareDiscovery, SoftwareDiscoveryClass
 from .data_discovery import DataDiscovery, DataDiscoveryClass
 from .data_access import DataAccessClass
-from .federated_execution import FederatedExecutionClass
+from .federated_execution import FederatedExecutionClass, JobDefinition
 from .chat import SRCNetChat
 
 #: Module-level DataAccess singleton — wraps the default SRCNet instance.
@@ -123,7 +123,7 @@ from .chat import SRCNetChat
 DataAccess = SRCNet.get_data_access()
 
 #: Module-level FederatedExecution singleton — wraps the default SRCNet instance.
-#: Requires :func:`SRCNet.login` before calling execute()/get_job()/cancel_job().
+#: Requires :func:`SRCNet.login` before calling submit()/check_status()/get_result().
 FederatedExecution = SRCNet.get_federated_execution()
 
 __all__ = [
@@ -133,6 +133,6 @@ __all__ = [
     'SoftwareDiscovery', 'SoftwareDiscoveryClass',
     'DataDiscovery', 'DataDiscoveryClass',
     'DataAccess', 'DataAccessClass',
-    'FederatedExecution', 'FederatedExecutionClass',
+    'FederatedExecution', 'FederatedExecutionClass', 'JobDefinition',
     'SRCNetChat',
 ]

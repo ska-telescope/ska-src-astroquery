@@ -2,10 +2,17 @@
 Tests for astroquery.srcnet.federated_execution module.
 
 Covers:
+  - JobDefinition: to_broker_request() (engine params, container image, in_datasets ->
+    rucio_dids, out_dataset/accounting_scope -> informational workflow_params,
+    task_name/job_name -> request_id/job_id), from_dict() (old design-study shape and
+    this class's own field names)
   - Proxied session/token/URL properties delegate to the parent SRCNetClass
-  - execute(): success, 402 -> CreditExceeded (wrapped into plain Exception by
-    handle_exceptions), other HTTP failures, non-JSON 402 body
+  - submit(): returns just job_id; execute(): returns the full response — both share the
+    same 402 -> CreditExceeded / other-HTTP-failure / non-JSON-402-body handling
+  - check_status(): returns just the state string
   - get_job(): success, HTTP failure
+  - get_result(): terminal-state gating (raises for a non-terminal state), builds its
+    DataLink-shaped entries from the logs response
   - cancel_job(): success
   - SRCNetClass.get_federated_execution() factory method returns the same
     cached instance, wired with the environment's computing_broker URL
@@ -13,7 +20,7 @@ Covers:
 import pytest
 from unittest.mock import MagicMock, patch
 
-from astroquery.srcnet.federated_execution import FederatedExecutionClass
+from astroquery.srcnet.federated_execution import FederatedExecutionClass, JobDefinition
 from astroquery.srcnet.core import SRCNetClass
 
 
@@ -57,6 +64,120 @@ def parent():
 @pytest.fixture
 def fe(parent):
     return FederatedExecutionClass(parent)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JobDefinition
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_to_broker_request_minimal_fields():
+    job = JobDefinition(job_name="my-job-0001")
+    body = job.to_broker_request()
+    assert body["job_id"] == "my-job-0001"
+    assert body["workflow_type"] == "snakemake"
+    assert body["workflow_type_version"] == "7"
+    assert body["workflow_engine_parameters"] == {}
+    assert "request_id" not in body
+    assert "workflow_params" not in body
+
+
+def test_to_broker_request_task_name_becomes_request_id():
+    job = JobDefinition(task_name="wf-EB12345-ContImaging", job_name="ws-0001")
+    body = job.to_broker_request()
+    assert body["request_id"] == "wf-EB12345-ContImaging"
+    assert body["job_id"] == "ws-0001"
+
+
+def test_to_broker_request_container_image_folds_into_engine_params():
+    job = JobDefinition(job_name="j1", container_image="registry.skao.int/ska-sdp-imaging:1.2.3")
+    body = job.to_broker_request()
+    assert body["workflow_engine_parameters"]["--image"] == "registry.skao.int/ska-sdp-imaging:1.2.3"
+
+
+def test_to_broker_request_container_image_does_not_override_explicit_image_param():
+    job = JobDefinition(
+        job_name="j1",
+        container_image="ignored:latest",
+        job_parameters={"--image": "explicit:latest"},
+    )
+    body = job.to_broker_request()
+    assert body["workflow_engine_parameters"]["--image"] == "explicit:latest"
+
+
+def test_to_broker_request_string_job_parameters_become_cmd():
+    job = JobDefinition(job_name="j1", job_parameters="--algorithm wsclean --niter 5000")
+    body = job.to_broker_request()
+    assert body["workflow_engine_parameters"]["--cmd"] == "--algorithm wsclean --niter 5000"
+
+
+def test_to_broker_request_in_datasets_become_real_rucio_dids():
+    # Real: the broker's own data-locality lookup (services/data_locality.py,
+    # requested_data_dids) reads workflow_params["rucio_dids"] for site preselection.
+    job = JobDefinition(
+        job_name="j1",
+        in_datasets=["user.j.salgado:EB12345_raw", "user.j.salgado:calibration_data"],
+    )
+    body = job.to_broker_request()
+    assert body["workflow_params"]["rucio_dids"] == [
+        "user.j.salgado:EB12345_raw", "user.j.salgado:calibration_data"
+    ]
+
+
+def test_to_broker_request_out_dataset_and_accounting_scope_are_informational_only():
+    # Not real: no output-dataset registration and no per-job accounting-scope override
+    # exist in the broker (see module docstring) — still carried through, not dropped.
+    job = JobDefinition(job_name="j1", out_dataset="user.j.salgado:job123", accounting_scope="sv-demo")
+    body = job.to_broker_request()
+    assert body["workflow_params"]["out_dataset"] == "user.j.salgado:job123"
+    assert body["workflow_params"]["accounting_scope"] == "sv-demo"
+
+
+def test_to_broker_request_metadata_merged_into_workflow_params():
+    job = JobDefinition(job_name="j1", metadata={"workflow_id": "wf-1", "observation_id": "EB12345"})
+    body = job.to_broker_request()
+    assert body["workflow_params"]["workflow_id"] == "wf-1"
+    assert body["workflow_params"]["observation_id"] == "EB12345"
+
+
+def test_to_broker_request_data_location_hints_passed_through_top_level():
+    hints = {"ip_address": "1.2.3.4"}
+    job = JobDefinition(job_name="j1", data_location_hints=hints)
+    body = job.to_broker_request()
+    assert body["data_location_hints"] == hints
+
+
+def test_from_dict_old_design_study_shape():
+    job = JobDefinition.from_dict({
+        "jobDefinition": {
+            "taskName": "wf-EB12345-ContImaging",
+            "jobName": "ws-20260130-001",
+            "container_name": "registry.skao.int/ska-sdp-imaging:1.2.3",
+            "jobParameters": "--algorithm wsclean --niter 5000",
+            "inDatasets": ["user.j.salgado:EB12345_raw", "user.j.salgado:calibration_data"],
+            "outDataset": ["user.j.salgado:job123"],
+            "metadata": {"workflow_id": "wf-EB12345-ContImaging", "observation_id": "EB12345"},
+        }
+    })
+    assert job.task_name == "wf-EB12345-ContImaging"
+    assert job.job_name == "ws-20260130-001"
+    assert job.container_image == "registry.skao.int/ska-sdp-imaging:1.2.3"
+    assert job.job_parameters == "--algorithm wsclean --niter 5000"
+    assert job.in_datasets == ["user.j.salgado:EB12345_raw", "user.j.salgado:calibration_data"]
+    assert job.out_dataset == "user.j.salgado:job123"  # unwrapped from the study's list shape
+    assert job.metadata == {"workflow_id": "wf-EB12345-ContImaging", "observation_id": "EB12345"}
+
+
+def test_from_dict_accepts_inner_object_directly():
+    job = JobDefinition.from_dict({"jobName": "j1", "job_parameters": {"--cores": "2"}})
+    assert job.job_name == "j1"
+    assert job.job_parameters == {"--cores": "2"}
+
+
+def test_from_dict_accepts_this_class_own_field_names():
+    job = JobDefinition.from_dict({"job_name": "j1", "task_name": "t1", "container_image": "img:latest"})
+    assert job.job_name == "j1"
+    assert job.task_name == "t1"
+    assert job.container_image == "img:latest"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +288,61 @@ def test_execute_other_http_failure_propagates(fe, parent):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# submit() -- same wire behaviour as execute(), but returns just job_id
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_submit_accepts_a_job_definition_and_returns_just_the_job_id(fe, parent):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {
+        "job_id": "my-job-0001", "state": "PENDING", "created": True,
+        "candidate_sites": ["int-stfc-1"], "dispatch_attempts": 0,
+    }
+    parent.session.post.return_value = resp
+
+    job_id = fe.submit(JobDefinition(job_name="my-job-0001", job_parameters={"--cores": "1"}))
+
+    assert job_id == "my-job-0001"
+    args, kwargs = parent.session.post.call_args
+    assert kwargs["json"]["job_id"] == "my-job-0001"
+    assert kwargs["json"]["workflow_engine_parameters"] == {"--cores": "1"}
+
+
+def test_submit_accepts_a_plain_dict_too(fe, parent):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"job_id": "my-job-0001", "state": "PENDING"}
+    parent.session.post.return_value = resp
+
+    assert fe.submit(_job()) == "my-job-0001"
+
+
+def test_submit_over_budget_raises_same_as_execute(fe, parent):
+    resp = MagicMock()
+    resp.status_code = 402
+    resp.json.return_value = {"detail": "project 'sv-demo' is over its credit budget (250/200 credits)"}
+    parent.session.post.return_value = resp
+
+    with pytest.raises(Exception, match="over its credit budget"):
+        fe.submit(_job())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_status()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_check_status_returns_just_the_state(fe, parent):
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"job_id": "my-job-0001", "state": "RUNNING"}
+    parent.session.get.return_value = resp
+
+    assert fe.check_status("my-job-0001") == "RUNNING"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # get_job() / cancel_job()
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -194,6 +370,71 @@ def test_cancel_job_success(fe, parent):
     assert result["state"] == "CANCELED"
     args, kwargs = parent.session.post.call_args
     assert args[0] == "http://broker.test/v1/jobs/my-job-0001/cancel"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_result()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_get_result_raises_for_a_non_terminal_state(fe, parent):
+    status_resp = MagicMock()
+    status_resp.raise_for_status.return_value = None
+    status_resp.json.return_value = {"job_id": "my-job-0001", "state": "RUNNING"}
+    parent.session.get.return_value = status_resp
+
+    with pytest.raises(Exception, match="has not finished yet"):
+        fe.get_result("my-job-0001")
+
+
+def test_get_result_builds_entries_from_logs_once_complete(fe, parent):
+    status_resp = MagicMock()
+    status_resp.raise_for_status.return_value = None
+    status_resp.json.return_value = {"job_id": "my-job-0001", "state": "COMPLETE"}
+
+    logs_resp = MagicMock()
+    logs_resp.raise_for_status.return_value = None
+    logs_resp.json.return_value = {
+        "job_id": "my-job-0001",
+        "run_id": "run-1",
+        "state": "COMPLETE",
+        "source": "run_dir",
+        "backend_details": {"output_path": "scratch://storm2.test/outputs"},
+        "stdout": {"available": True, "path": "/run/stdout.log", "content": "all good"},
+        "stderr": {"available": False, "path": None, "content": None},
+    }
+    parent.session.get.side_effect = [status_resp, logs_resp]
+
+    result = fe.get_result("my-job-0001")
+
+    assert result["job_id"] == "my-job-0001"
+    assert result["state"] == "COMPLETE"
+    assert result["output_path"] == "scratch://storm2.test/outputs"
+    assert result["entries"] == [
+        {"semantic": "#log", "filename": "stdout", "content": "all good", "path": "/run/stdout.log"},
+    ]
+    # unavailable stderr is omitted, not included as an empty entry
+    assert len(result["entries"]) == 1
+
+    logs_call_args, _ = parent.session.get.call_args_list[1]
+    assert logs_call_args[0] == "http://broker.test/v1/jobs/my-job-0001/logs"
+
+
+def test_get_result_handles_missing_backend_details(fe, parent):
+    status_resp = MagicMock()
+    status_resp.raise_for_status.return_value = None
+    status_resp.json.return_value = {"job_id": "my-job-0001", "state": "FAILED"}
+
+    logs_resp = MagicMock()
+    logs_resp.raise_for_status.return_value = None
+    logs_resp.json.return_value = {
+        "job_id": "my-job-0001", "run_id": None, "state": "FAILED", "source": "unavailable",
+    }
+    parent.session.get.side_effect = [status_resp, logs_resp]
+
+    result = fe.get_result("my-job-0001")
+
+    assert result["output_path"] is None
+    assert result["entries"] == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

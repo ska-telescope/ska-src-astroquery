@@ -113,25 +113,32 @@ questions without repeating context.  Call SRCNet._chat.reset() to start fresh.
 
 ─── Federated Execution — submit and track jobs via the computing broker ────
 
+  from astroquery.srcnet import JobDefinition
+
   SRCNet.login()                            # OIDC device flow — required once
   fe = SRCNet.get_federated_execution()     # FederatedExecutionClass
 
-  # Submit a job (a plain dict — the broker's JobSubmitRequest shape)
-  result = fe.execute({
-      "workflow_type": "snakemake",
-      "workflow_type_version": "7",
-      "workflow_engine_parameters": {"--cores": "1"},
-      "job_id": "my-job-0001",
-  })
-  print(result["state"])                    # e.g. "PENDING"
+  job = JobDefinition(
+      task_name="wf-EB12345-ContImaging",
+      job_name="my-job-0001",
+      container_image="registry.skao.int/ska-sdp-imaging:1.2.3",
+      job_parameters={"--cores": "1"},
+      in_datasets=["user.j.salgado:EB12345_raw"],       # real: biases site selection
+      metadata={"observation_id": "EB12345"},           # informational
+  )
+  job_id = fe.submit(job)
 
   # Poll status
-  fe.get_job(result["job_id"])["state"]
+  fe.check_status(job_id)                   # e.g. "PENDING" / "RUNNING" / "COMPLETE"
+
+  # Once COMPLETE: logs + the run's raw output location (not a resolved file list —
+  # the broker has no dataset-registration step yet, see federated_execution.py)
+  fe.get_result(job_id)
 
   # An over-budget project is refused at admission (broker 402) — inspect
   # str(e), the same as every other error in this package:
   try:
-      fe.execute(job)
+      fe.submit(job)
   except Exception as e:
       print(e)                              # "...over its credit budget..."
 
@@ -372,7 +379,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         must be called before using any of these methods if the broker
         requires authentication.
 
-        A job is refused at admission time — :meth:`FederatedExecutionClass.execute`
+        A job is refused at admission time — :meth:`FederatedExecutionClass.submit`
         raises — if the owning project has no remaining credit budget on the
         central Accounting & Quota Service; see
         :class:`~astroquery.srcnet.exceptions.CreditExceeded`.
@@ -383,15 +390,14 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
 
         Examples
         --------
+        >>> from astroquery.srcnet import JobDefinition
         >>> SRCNet.login()
         >>> fe = SRCNet.get_federated_execution()
-        >>> result = fe.execute({
-        ...     "workflow_type": "snakemake",
-        ...     "workflow_type_version": "7",
-        ...     "workflow_engine_parameters": {"--cores": "1"},
-        ...     "job_id": "my-job-0001",
-        ... })
-        >>> fe.get_job(result["job_id"])["state"]
+        >>> job = JobDefinition(job_name="my-job-0001", job_parameters={"--cores": "1"})
+        >>> job_id = fe.submit(job)
+        >>> fe.check_status(job_id)
+        'PENDING'
+        >>> fe.get_result(job_id)  # once check_status(job_id) == "COMPLETE"
         """
         return self._federated_execution
 
