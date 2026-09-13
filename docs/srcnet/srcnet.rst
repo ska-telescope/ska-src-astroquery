@@ -9,14 +9,17 @@ Overview
 
 `astroquery.srcnet` provides the astroquery interface to the SRCNet platform.
 It supports querying CAOM2 observational data and the software discovery
-registry via TAP services, as well as authenticated data download and
-SODA cutouts through a dedicated :class:`~astroquery.srcnet.DataAccessClass`.
+registry via TAP services, authenticated data download and SODA cutouts
+through a dedicated :class:`~astroquery.srcnet.DataAccessClass`, and submitting
+jobs to the SRCNet federated compute pool through a dedicated
+:class:`~astroquery.srcnet.FederatedExecutionClass`.
 
 The library follows the **astroquery factory pattern**: a module-level
 singleton ``SRCNet`` is provided for convenience; factory methods
 (:meth:`~astroquery.srcnet.SRCNetClass.get_tap`,
 :meth:`~astroquery.srcnet.SRCNetClass.get_software_discovery`,
 :meth:`~astroquery.srcnet.SRCNetClass.get_data_access`,
+:meth:`~astroquery.srcnet.SRCNetClass.get_federated_execution`,
 :meth:`~astroquery.srcnet.SRCNetClass.get_chat`) return purpose-built clients
 configured for the current environment.
 
@@ -124,13 +127,14 @@ Environments
 ------------
 
 All service URLs are derived from the ``SRCNET_ENVIRONMENT`` configuration item.
-The default is ``"operational"``; switch to ``"development"`` to target the
-pre-production deployment:
+The default is ``"production"``; switch to ``"preprod"`` to target the
+pre-production deployment, or ``"local"`` for services running on localhost
+(authenticated against a dev mock IAM — see ``astroquery.srcnet.ENVIRONMENTS``):
 
 .. code-block:: python
 
     >>> from astroquery.srcnet import conf
-    >>> conf.SRCNET_ENVIRONMENT = "development"   # all subsequent calls use dev URLs
+    >>> conf.SRCNET_ENVIRONMENT = "preprod"   # all subsequent calls use preprod URLs
 
 Available environments and their entry points are listed in
 ``astroquery.srcnet.ENVIRONMENTS``.
@@ -331,6 +335,96 @@ artifacts, then download or cut out the product of interest.
     >>> uri = str(artifacts["uri"][0])   # e.g. "testing:PTF10tce.fits"
     >>> ns, fname = uri.split(":", 1)
     >>> da.get_data(ns, fname)
+
+
+Federated Execution
+--------------------
+
+``FederatedExecutionClass`` submits jobs to the SRCNet federated compute pool
+via the SRCNet computing broker, and tracks them through to completion.
+Obtain an instance through the factory method:
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import SRCNet, JobDefinition
+    >>> SRCNet.login()
+    >>> fe = SRCNet.get_federated_execution()
+
+All methods require a valid login session.
+
+``JobDefinition`` describes a job — a container image to run, its parameters,
+and any input data it needs. Its field names follow an earlier SRCNet design
+study for a Global Execution API, so job descriptions written against that
+study translate directly (see :meth:`~JobDefinition.from_dict`); underneath,
+:meth:`~JobDefinition.to_broker_request` renders the *real* computing
+broker's submission format.
+
+.. code-block:: python
+
+    >>> job = JobDefinition(
+    ...     task_name="wf-EB12345-ContImaging",
+    ...     job_name="ws-20260130-001",
+    ...     container_image="registry.skao.int/ska-sdp-imaging:1.2.3",
+    ...     job_parameters="--algorithm wsclean --niter 5000",
+    ...     in_datasets=["user.j.salgado:EB12345_raw", "user.j.salgado:calibration_data"],
+    ...     metadata={"observation_id": "EB12345"},
+    ... )
+
+Not every field changes broker behaviour today: ``in_datasets`` biases site
+selection towards where that data already lives (the broker resolves it via
+the SRCNet Data Management API); ``out_dataset`` and ``accounting_scope`` are
+recorded with the job for forward compatibility, but the broker does not yet
+register an output dataset, and always resolves the paying project from the
+submitter's own token rather than from the job body.
+
+submit
+^^^^^^
+
+Submit a job and get back its broker-assigned ``job_id``.
+
+.. code-block:: python
+
+    >>> job_id = fe.submit(job)
+
+If the owning project has no remaining credit budget, the broker refuses the
+job at admission time and this raises — inspect ``str(e)`` for the credit-gate
+detail (project name and budget numbers).
+
+check_status
+^^^^^^^^^^^^
+
+Poll a job's current state — ``"PENDING"``, ``"RUNNING"``, ``"COMPLETE"``,
+``"FAILED"``, and so on.
+
+.. code-block:: python
+
+    >>> fe.check_status(job_id)
+    'RUNNING'
+
+get_result
+^^^^^^^^^^
+
+Once a job reaches a terminal state, retrieve its output location and
+captured logs. Raises if the job has not finished yet.
+
+.. code-block:: python
+
+    >>> fe.get_result(job_id)
+    {'job_id': '...', 'state': 'COMPLETE', 'output_path': 'scratch://...',
+     'entries': [{'semantic': '#log', 'filename': 'stdout', 'content': '...', 'path': '...'}]}
+
+This is not yet a resolved, per-file listing with download URLs — the broker
+has no dataset-resolution step to build that from today; ``output_path`` is
+the run's own raw, backend-native output location.
+
+cancel_job
+^^^^^^^^^^
+
+Request cancellation of a previously submitted job.
+
+.. code-block:: python
+
+    >>> fe.cancel_job(job_id)
 
 
 Software Discovery
