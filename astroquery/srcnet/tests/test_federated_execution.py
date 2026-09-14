@@ -12,7 +12,8 @@ Covers:
   - check_status(): returns just the state string
   - get_job(): success, HTTP failure
   - get_result(): terminal-state gating (raises for a non-terminal state), builds its
-    DataLink-shaped entries from the logs response
+    entries from the logs response, and always reports data_access.supported == False
+    (no Rucio-backed stage-out yet -- the "Battle API" gap)
   - cancel_job(): success
   - SRCNetClass.get_federated_execution() factory method returns the same
     cached instance, wired with the environment's computing_broker URL
@@ -414,6 +415,10 @@ def test_get_result_builds_entries_from_logs_once_complete(fe, parent):
     ]
     # unavailable stderr is omitted, not included as an empty entry
     assert len(result["entries"]) == 1
+    # data_access always reports unsupported today -- no Rucio-backed stage-out exists
+    # regardless of how the job itself turned out (pending the "Battle API" gap).
+    assert result["data_access"]["supported"] is False
+    assert "Battle API" in result["data_access"]["reason"]
 
     logs_call_args, _ = parent.session.get.call_args_list[1]
     assert logs_call_args[0] == "http://broker.test/v1/jobs/my-job-0001/logs"
@@ -435,6 +440,7 @@ def test_get_result_handles_missing_backend_details(fe, parent):
 
     assert result["output_path"] is None
     assert result["entries"] == []
+    assert result["data_access"]["supported"] is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

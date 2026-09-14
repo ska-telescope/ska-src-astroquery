@@ -34,10 +34,20 @@ and :class:`JobDefinition`'s fields intentionally mirror that study's shape so j
 descriptions and calling code translate directly, but three things it assumed are only
 partially or not yet real here -- called out explicitly, not silently faked:
 
-- ``in_datasets`` **is real**: it maps onto the broker's own ``workflow_params["rucio_dids"]``,
-  which real DMAPI-backed site preselection reads today (see
-  ``services/data_locality.py``'s ``requested_data_dids``) -- data-aware placement, the same
-  intent as the study's input datasets, just not phrased as "datasets" server-side.
+- ``in_datasets`` **only steers scheduling, it does not get you data access**: it maps onto
+  the broker's own ``workflow_params["rucio_dids"]``, which real DMAPI-backed site
+  preselection reads today (see ``services/data_locality.py``'s ``requested_data_dids``) --
+  data-aware placement, the same intent as the study's input datasets, just not phrased as
+  "datasets" server-side. DMAPI only resolves *where a replica lives*, never a fetchable
+  access URL. Actually mounting that data onto the pilot the job lands on is delegated to a
+  separate, site-local component the broker's own run-leader assumes exists -- referred to in
+  that code as the **"Battle API"** (``etc/leader/ska_run_leader.py``: a HTCondor
+  ``PREPARE_JOB`` hook is expected to resolve the ``dav://`` PFN and mount it before the
+  payload starts; a failure there holds the job with reason like ``"battle 403, stage-in
+  FAILED"``). There is no Battle API client, mock, or implementation anywhere in the broker
+  repository -- it is real, external, site-operated infrastructure this package cannot reach
+  or verify, and until it exists everywhere jobs run, an ``in_datasets`` entry only ever
+  *narrows which site the job runs on*, not whether the job can read the data once there.
 - ``out_dataset`` and ``accounting_scope`` are **informational only**: carried through in
   ``workflow_params`` so they travel with the job (and are visible to anyone inspecting it
   server-side), but the broker does not register an output dataset anywhere, and the credit
@@ -46,8 +56,12 @@ partially or not yet real here -- called out explicitly, not silently faked:
   change who gets billed.
 - :meth:`FederatedExecutionClass.get_result` returns the job's real, raw
   ``backend_details.output_path`` (wherever the run was configured to write its output) and
-  its captured stdout/stderr -- not a per-file, DataLink-style listing with resolvable
-  download URLs. There is no dataset-resolution step in the broker to build that from yet.
+  its captured stdout/stderr -- **not** a resolved, downloadable URL, and not a per-file
+  listing. The same Battle API gap applies on the way out: stage-out into a Rucio-visible
+  location, and any output-dataset registration, is future work blocked on that same
+  site-local component. Until then, retrieving the actual output bytes is out of band from
+  this API entirely (e.g. direct site storage access arranged separately with the site), not
+  something ``get_result`` can hand you a URL for.
 """
 from astroquery.srcnet.exceptions import (
     handle_exceptions,
@@ -94,12 +108,18 @@ class JobDefinition:
         for convenience and stored as ``{"--cmd": job_parameters}``.
     in_datasets : list of str, optional
         Input dataset identifiers, ``"scope:name"`` (matching this package's own Data Access
-        namespace:name convention, and the broker's Rucio DID convention). **Real**: sent as
-        ``workflow_params["rucio_dids"]``, which the broker's site preselection uses for
-        data-aware placement.
+        namespace:name convention, and the broker's Rucio DID convention). Sent as
+        ``workflow_params["rucio_dids"]``, which the broker's site preselection **really**
+        uses for data-aware placement (it runs the job where a replica already lives) — but
+        that is *all* it does today. It does not arrange for the job to actually read the
+        data once it lands there; that step depends on the site-local "Battle API" the real
+        broker assumes but does not implement (see module docstring). Until that exists, the
+        job itself is responsible for however it actually accesses its input at the site it's
+        scheduled to.
     out_dataset : str, optional
         Output dataset identifier. **Informational only** — see module docstring; recorded
-        in ``workflow_params["out_dataset"]`` but not registered or resolved by the broker.
+        in ``workflow_params["out_dataset"]`` but not registered or resolved by the broker,
+        and does not cause output to be staged anywhere Rucio-visible.
     accounting_scope : str, optional
         The project/group this job's usage is intended to bill to. **Informational only** —
         see module docstring; the broker always resolves the paying project from the
@@ -408,23 +428,35 @@ class FederatedExecutionClass:
     def get_result(self, job_id, timeout=20):
         """Return what the broker can tell you about a job's output.
 
-        **Not** a resolved, per-file listing with download URLs — the broker has no
-        dataset-registration step to build that from yet (see this module's own
-        docstring). This returns the job's real raw output location and its captured
-        stdout/stderr, in a DataLink-*shaped* document so callers already written against
-        that shape only need to adapt to weaker guarantees, not a different structure:
+        **This is not a resolved, per-file listing with download URLs, and it cannot be
+        turned into one by this method.** The broker has no output-dataset-registration
+        step, and no Rucio-backed stage-out, to build that from — both are blocked on the
+        same site-local "Battle API" gap described in this module's docstring. What you get
+        instead is the job's real, raw output location (wherever the run was configured to
+        write) and its captured stdout/stderr:
 
         .. code-block:: python
 
             {
                 "job_id": "...",
                 "state": "COMPLETE",
-                "output_path": "scratch://storm2.test/outputs",  # or None
+                "output_path": "scratch://storm2.test/outputs",  # or None -- NOT a
+                                                                  # resolved download URL
                 "entries": [
                     {"semantic": "#log", "filename": "stdout", "content": "..."},
                     {"semantic": "#log", "filename": "stderr", "content": "..."},
                 ],
+                "data_access": {
+                    "supported": False,
+                    "reason": "no Rucio-backed stage-out yet -- pending the SRCNet "
+                              "'Battle API' data-access layer; output_path is a raw "
+                              "location, not a fetchable URL",
+                },
             }
+
+        ``data_access`` is included so calling code can branch on this gap programmatically
+        instead of only via documentation -- check ``result["data_access"]["supported"]``
+        before assuming ``output_path`` can be opened directly.
 
         Parameters
         ----------
@@ -473,6 +505,13 @@ class FederatedExecutionClass:
             "state": state,
             "output_path": backend_details.get("output_path"),
             "entries": entries,
+            "data_access": {
+                "supported": False,
+                "reason": (
+                    "no Rucio-backed stage-out yet -- pending the SRCNet 'Battle API' "
+                    "data-access layer; output_path is a raw location, not a fetchable URL"
+                ),
+            },
         }
 
     @handle_exceptions

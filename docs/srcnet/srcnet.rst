@@ -372,10 +372,17 @@ broker's submission format.
 
 Not every field changes broker behaviour today: ``in_datasets`` biases site
 selection towards where that data already lives (the broker resolves it via
-the SRCNet Data Management API); ``out_dataset`` and ``accounting_scope`` are
-recorded with the job for forward compatibility, but the broker does not yet
-register an output dataset, and always resolves the paying project from the
-submitter's own token rather than from the job body.
+the SRCNet Data Management API), but that is *all* it does — it does not
+arrange for the job to actually read the data once scheduled there. Real
+stage-in (mounting the resolved replica onto the pilot) and stage-out
+(publishing the job's output somewhere Rucio-visible) both depend on a
+site-local component the broker's own run-leader assumes but does not
+implement, referred to there as the "Battle API" — until every site runs
+one, a job is on its own for actually accessing its input/output data at
+wherever it lands. ``out_dataset`` and ``accounting_scope`` are recorded with
+the job for forward compatibility, but the broker does not yet register an
+output dataset, and always resolves the paying project from the submitter's
+own token rather than from the job body.
 
 submit
 ^^^^^^
@@ -411,11 +418,18 @@ captured logs. Raises if the job has not finished yet.
 
     >>> fe.get_result(job_id)
     {'job_id': '...', 'state': 'COMPLETE', 'output_path': 'scratch://...',
-     'entries': [{'semantic': '#log', 'filename': 'stdout', 'content': '...', 'path': '...'}]}
+     'entries': [{'semantic': '#log', 'filename': 'stdout', 'content': '...', 'path': '...'}],
+     'data_access': {'supported': False, 'reason': "no Rucio-backed stage-out yet -- "
+                     "pending the SRCNet 'Battle API' data-access layer; output_path is "
+                     "a raw location, not a fetchable URL"}}
 
-This is not yet a resolved, per-file listing with download URLs — the broker
-has no dataset-resolution step to build that from today; ``output_path`` is
-the run's own raw, backend-native output location.
+This is not a resolved, per-file listing with download URLs, and it cannot
+become one by calling this differently — the broker has no dataset-resolution
+step to build that from today (see the Battle API note above); ``output_path``
+is the run's own raw, backend-native output location, not a fetchable URL.
+``data_access`` is always ``{'supported': False, ...}`` today, included so
+calling code can check it rather than assume ``output_path`` is directly
+usable.
 
 cancel_job
 ^^^^^^^^^^
