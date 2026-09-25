@@ -30,6 +30,12 @@ Simple usage via the module singleton::
     adql = DataDiscovery.nl_to_adql("how many observations per collection?")
     print(adql)
 
+    # Typed shortcuts (no ADQL to write) -- any combination of filters
+    filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+    results = DataDiscovery.search(filters)
+    counts = DataDiscovery.count_by(["dataproduct_type"], filters)
+    adql = DataDiscovery.explain(filters)  # what search() would run, unexecuted
+
 Switch environment::
 
     from astroquery.srcnet import conf
@@ -40,7 +46,8 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import pyvo
@@ -53,7 +60,7 @@ from urllib3.util.retry import Retry
 
 from ._helpdesk import srcnet_raise
 
-__all__ = ["DataDiscovery", "DataDiscoveryClass"]
+__all__ = ["DataDiscovery", "DataDiscoveryClass", "SearchFilters"]
 
 
 # ── NL → ADQL prompt ──────────────────────────────────────────────────────────
@@ -103,6 +110,72 @@ _NL_TO_ADQL_PROMPT = (
 )
 
 
+# ── Shared filter object ───────────────────────────────────────────────────────
+
+@dataclass
+class SearchFilters:
+    """
+    Shared filter object for :meth:`DataDiscoveryClass.search`,
+    :meth:`~DataDiscoveryClass.count_by` and :meth:`~DataDiscoveryClass.explain`.
+
+    Every field is optional and independent — set any combination, or none, and
+    it applies equally to all three methods (they build the WHERE clause
+    through the exact same internal helper, so they can never disagree on what
+    a given filter set means).
+
+    Deliberately does not include a ``project`` field: no such column exists
+    yet on Argus's ``ivoa.ObsCore`` (confirmed live —
+    ``Column: [dataproduct_subtype] does not exist``, the field DaCHS used to
+    hold it), and it's still an open question where "project" would even live
+    in CAOM for SKA data. Add it once that's answered rather than guess.
+
+    All string filters match exact, ignoring case (``UPPER(col) = UPPER(...)``)
+    — narrower than :meth:`DataDiscoveryClass.query_observations`'s substring
+    (``LIKE '%...%'``) matching. That's a deliberate choice for these *new*
+    methods; it does not change ``query_observations``/``query_name`` or their
+    existing callers.
+
+    Attributes
+    ----------
+    coordinates : `~astropy.coordinates.SkyCoord`, optional
+        Cone-search centre (ICRS). Requires *radius* too.
+    radius : `~astropy.units.Quantity`, optional
+        Cone-search radius, e.g. ``0.5 * u.deg``.
+    obs_publisher_did : list of str, optional
+        Exact-match publisher DIDs (``IN (...)``).
+    dataproduct_type : str, optional
+        ``None`` = no filter. ``""`` = match a blank/NULL ``dataproduct_type``.
+        Anything else = exact match, ignoring case.
+    target_name : str, optional
+        Exact match, ignoring case.
+    collection : str, optional
+        Exact match on ``obs_collection``, ignoring case.
+    facility : str, optional
+        Exact match on ``facility_name``, ignoring case.
+    instrument : str, optional
+        Exact match on ``instrument_name``, ignoring case.
+    namespace : str, optional
+        Rucio DID namespace, matched as a prefix on ``obs_id``
+        (``obs_id LIKE 'namespace:%'``) — the same convention-dependent split
+        the Gateway itself relies on today, not a real Argus column. Nothing
+        in the ObsCore standard requires ``obs_id`` to encode this.
+    filename : str, optional
+        Rucio DID filename, matched as a suffix on ``obs_id``
+        (``obs_id LIKE '%:filename'``) — same caveat as *namespace*.
+    """
+
+    coordinates: Optional[SkyCoord] = None
+    radius: Optional[u.Quantity] = None
+    obs_publisher_did: Optional[List[str]] = None
+    dataproduct_type: Optional[str] = None
+    target_name: Optional[str] = None
+    collection: Optional[str] = None
+    facility: Optional[str] = None
+    instrument: Optional[str] = None
+    namespace: Optional[str] = None
+    filename: Optional[str] = None
+
+
 # ── Client class ──────────────────────────────────────────────────────────────
 
 class DataDiscoveryClass:
@@ -129,6 +202,18 @@ class DataDiscoveryClass:
     OBS_TABLE     = "caom2.Observation"
     PLANE_TABLE   = "caom2.Plane"
     ART_TABLE     = "caom2.Artifact"
+
+    #: Default columns for :meth:`search` — the 13-column set the Gateway
+    #: selects today (MAN-827 §1/§2), minus ``dataproduct_subtype``: confirmed
+    #: live against Argus that it does not exist on ``ivoa.ObsCore``
+    #: (``validateColumnNonAlias: Column: [dataproduct_subtype] does not
+    #: exist``) — DaCHS used it to hold the project name; Argus has no
+    #: equivalent yet (see :class:`SearchFilters`).
+    DEFAULT_SEARCH_COLUMNS = (
+        "obs_publisher_did, target_name, obs_id, dataproduct_type, calib_level, "
+        "obs_collection, access_url, access_format, facility_name, "
+        "instrument_name, s_ra, s_dec"
+    )
 
     def __init__(
         self,
@@ -423,6 +508,383 @@ class DataDiscoveryClass:
             print(f"[ADQL] {adql}")
         return self.query(adql, maxrec=maxrec)
 
+    # ── Typed shortcuts (MAN-827 §6) ──────────────────────────────────────────
+    #
+    # search/count_by/explain share one filter object (SearchFilters) and one
+    # WHERE-clause builder (_build_where), so "what would this filter set
+    # match" can never drift between what search() executes and what
+    # explain() shows. Three real Argus ADQL-dialect limits, each confirmed
+    # live against the real service (not assumed from MAN-827's own
+    # description of the *current*, DaCHS-backed Gateway), shape all of this:
+    #
+    #   1. OFFSET is rejected outright ("invalid ADQL keyword: LIMIT") --
+    #      MAN-827's own page/page_size contract (TOP + OFFSET, matching what
+    #      DaCHS accepts today) does not carry over to Argus. search() uses
+    #      keyset pagination on obs_publisher_did instead (see its docstring).
+    #   2. Sub-selects in FROM are rejected outright ("sub-select not
+    #      supported in FROM clause") -- the current Gateway's own
+    #      SELECT COUNT(*) FROM (...) trick for counting a free-form query
+    #      does not work here either. count_adql() executes and measures
+    #      instead of wrapping (see its docstring).
+    #   3. DISTANCE() is rejected outright ("DISTANCE not supported"), even
+    #      for two literal points -- so a position filter can't compute
+    #      angular_separation or sort "nearest first" the way
+    #      query_region()/the current Gateway do. search() falls back to no
+    #      further paging for a position search rather than claim an
+    #      ordering it can't produce.
+
+    def _build_where(self, filters: Optional[SearchFilters]) -> List[str]:
+        """ANDed WHERE conditions for *filters* — shared by :meth:`search`,
+        :meth:`count_by` and :meth:`explain`."""
+        if filters is None:
+            return []
+        where: List[str] = []
+
+        if filters.coordinates is not None and filters.radius is not None:
+            ra = filters.coordinates.icrs.ra.deg
+            dec = filters.coordinates.icrs.dec.deg
+            r = filters.radius.to(u.deg).value
+            # s_region, not s_ra/s_dec: s_region is indexed on Argus, s_ra/s_dec
+            # are not (MAN-827 §2). CONTAINS(s_region, ...) parses and executes
+            # fine against Argus today (confirmed live) even though the table
+            # is currently empty, so this can't yet be verified against real
+            # rows -- query_region() above is left on s_ra/s_dec so it keeps
+            # behaving exactly as before.
+            where.append(f"CONTAINS(s_region, CIRCLE('ICRS', {ra}, {dec}, {r})) = 1")
+
+        if filters.obs_publisher_did:
+            in_list = ", ".join(f"'{_esc(d)}'" for d in filters.obs_publisher_did)
+            where.append(f"obs_publisher_did IN ({in_list})")
+
+        if filters.dataproduct_type is not None:
+            if filters.dataproduct_type == "":
+                where.append("(dataproduct_type IS NULL OR dataproduct_type = '')")
+            else:
+                where.append(f"UPPER(dataproduct_type) = UPPER('{_esc(filters.dataproduct_type)}')")
+
+        if filters.target_name:
+            where.append(f"UPPER(target_name) = UPPER('{_esc(filters.target_name)}')")
+        if filters.collection:
+            where.append(f"UPPER(obs_collection) = UPPER('{_esc(filters.collection)}')")
+        if filters.facility:
+            where.append(f"UPPER(facility_name) = UPPER('{_esc(filters.facility)}')")
+        if filters.instrument:
+            where.append(f"UPPER(instrument_name) = UPPER('{_esc(filters.instrument)}')")
+        if filters.namespace:
+            where.append(f"obs_id LIKE '{_esc(filters.namespace)}:%'")
+        if filters.filename:
+            where.append(f"obs_id LIKE '%:{_esc(filters.filename)}'")
+
+        return where
+
+    def _has_position(self, filters: Optional[SearchFilters]) -> bool:
+        return filters is not None and filters.coordinates is not None and filters.radius is not None
+
+    def _search_adql(
+        self,
+        filters: Optional[SearchFilters],
+        columns: str,
+        after: Optional[str],
+        top_n: int,
+    ) -> str:
+        """The ADQL both :meth:`search` and :meth:`explain` build — one
+        function, so they can never disagree with each other."""
+        where = self._build_where(filters)
+        if after and not self._has_position(filters):
+            where = where + [f"obs_publisher_did > '{_esc(after)}'"]
+
+        adql = f"SELECT TOP {top_n} {columns} FROM {self.OBSCORE_TABLE}"
+        if where:
+            adql += " WHERE " + " AND ".join(where)
+        if not self._has_position(filters):
+            adql += " ORDER BY obs_publisher_did"
+        return adql
+
+    def search(
+        self,
+        filters: Optional[SearchFilters] = None,
+        *,
+        columns: Optional[str] = None,
+        after: Optional[str] = None,
+        page_size: int = 100,
+        split_obs_id: bool = True,
+        with_total_count: bool = False,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        One shortcut covering every combination of the Gateway's filters
+        (MAN-827 §5 requirement 1) — position, collection, facility,
+        instrument, target name, data-product type, a publisher-DID list, and
+        Rucio namespace/filename, all ANDed, any subset set or none.
+
+        Pagination is keyset-based (*after* / ``obs_publisher_did``), **not**
+        the ``page``/``page_size`` OFFSET scheme MAN-827 proposes — confirmed
+        live against Argus that ``OFFSET`` is rejected outright
+        (``invalid ADQL keyword: LIMIT``), so page-N pagination the way the
+        current DaCHS-backed Gateway does it isn't possible against this
+        service today. Pass the previous call's ``table.meta["next_after"]``
+        back in as *after* to get the next page; it's ``None`` once there are
+        no more rows.
+
+        A position filter (*filters.coordinates* set) drops the keyset order:
+        ``angular_separation``/"nearest first" isn't available either —
+        ``DISTANCE()`` is rejected server-side (confirmed live, even for two
+        literal points: ``DISTANCE not supported``) — so a position search
+        just returns up to *page_size* rows with no further pages, rather
+        than claim an ordering this service can't produce.
+
+        Parameters
+        ----------
+        filters : SearchFilters, optional
+            Shared filter object — see :class:`SearchFilters`. ``None`` (the
+            default) searches everything.
+        columns : str, optional
+            ADQL column list. Defaults to :attr:`DEFAULT_SEARCH_COLUMNS`.
+        after : str, optional
+            Keyset cursor — see above.
+        page_size : int, optional
+            Max rows this call returns.
+        split_obs_id : bool, optional
+            Also add ``namespace``/``filename`` columns, split from ``obs_id``
+            on the first ``:`` — the same convention-dependent split the
+            Gateway's own code does today (MAN-827 §3 finding 3); Argus does
+            not expose these as native columns yet.
+        with_total_count : bool, optional
+            Also run a second, filter-scoped ``COUNT(*)`` (no sub-select — see
+            :meth:`count_adql`'s docstring for why that matters here) and
+            stash it in ``table.meta["total_count"]``. Off by default: MAN-827
+            itself notes the Gateway already treats counting as a separate
+            call from paging, so a slow count never blocks the first page.
+        verbose : bool, optional
+            Print the generated ADQL before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            ``table.meta["next_after"]`` is the cursor for the next page, or
+            ``None`` if this was the last one. ``table.meta["total_count"]``
+            is present only when *with_total_count* is true.
+
+        Examples
+        --------
+        >>> filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+        >>> page1 = DataDiscovery.search(filters, page_size=50)
+        >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+        """
+        columns = columns or self.DEFAULT_SEARCH_COLUMNS
+        has_position = self._has_position(filters)
+        # Fetch one extra row to learn whether another page exists, without a
+        # second round trip or an OFFSET this service doesn't support; trimmed
+        # back to page_size before returning.
+        adql = self._search_adql(filters, columns, after, page_size + 1)
+
+        if verbose:
+            print(f"[ADQL] {adql}")
+
+        table = self.query(adql, maxrec=page_size + 1)
+
+        has_more = len(table) > page_size
+        if has_more:
+            table = table[:page_size]
+
+        if split_obs_id and "obs_id" in table.colnames:
+            _add_namespace_filename_columns(table)
+
+        table.meta["next_after"] = (
+            str(table["obs_publisher_did"][-1])
+            if has_more and not has_position and len(table) and "obs_publisher_did" in table.colnames
+            else None
+        )
+
+        if with_total_count:
+            count_where = self._build_where(filters)
+            count_adql = f"SELECT COUNT(*) AS num_records FROM {self.OBSCORE_TABLE}"
+            if count_where:
+                count_adql += " WHERE " + " AND ".join(count_where)
+            count_table = self.query(count_adql, maxrec=1)
+            table.meta["total_count"] = int(count_table["num_records"][0]) if len(count_table) else 0
+
+        return table
+
+    def count_by(
+        self,
+        group_by: Optional[List[str]] = None,
+        filters: Optional[SearchFilters] = None,
+        *,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Row counts grouped by one or more fields, for the same filter set
+        :meth:`search` accepts (MAN-827 §5 requirement 3 — the
+        search-catalogue type tabs and ADQL template 3).
+
+        Parameters
+        ----------
+        group_by : list of str, optional
+            ObsCore column names to group by. Defaults to
+            ``["dataproduct_type"]``, matching MAN-827's stated default.
+        filters : SearchFilters, optional
+            Same filter object :meth:`search` takes.
+        verbose : bool, optional
+            Print the generated ADQL before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            One row per group, plus ``num_records``.
+
+        Examples
+        --------
+        >>> DataDiscovery.count_by(["dataproduct_type", "facility_name"])
+        """
+        group_by = group_by or ["dataproduct_type"]
+        cols = ", ".join(group_by)
+        where = self._build_where(filters)
+
+        adql = f"SELECT {cols}, COUNT(*) AS num_records FROM {self.OBSCORE_TABLE}"
+        if where:
+            adql += " WHERE " + " AND ".join(where)
+        adql += f" GROUP BY {cols} ORDER BY num_records DESC"
+
+        if verbose:
+            print(f"[ADQL] {adql}")
+        return self.query(adql, maxrec=500)
+
+    def explain(
+        self,
+        filters: Optional[SearchFilters] = None,
+        *,
+        columns: Optional[str] = None,
+        after: Optional[str] = None,
+        page_size: int = 100,
+    ) -> str:
+        """
+        Return the ADQL :meth:`search` would run for *filters*, without
+        executing it (MAN-827 §5 requirement 5 — the "show query" modal).
+
+        Built through the exact same :meth:`_search_adql` helper
+        :meth:`search` uses, so this can never drift out of sync with what
+        ``search(filters)`` actually does. The one difference: this shows
+        ``TOP page_size``, not the ``page_size + 1`` :meth:`search` fetches
+        internally to detect whether another page exists — that's an
+        implementation detail of pagination, not something a user editing
+        this ADQL in a "show query" modal should see.
+
+        Parameters
+        ----------
+        filters : SearchFilters, optional
+            Same filter object :meth:`search` takes.
+        columns : str, optional
+            Same as :meth:`search`.
+        after : str, optional
+            Same as :meth:`search`.
+        page_size : int, optional
+            Same as :meth:`search` — shown here as the real ``TOP`` value.
+
+        Returns
+        -------
+        str
+
+        Examples
+        --------
+        >>> DataDiscovery.explain(SearchFilters(collection="JCMT"))
+        "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did"
+        """
+        columns = columns or self.DEFAULT_SEARCH_COLUMNS
+        return self._search_adql(filters, columns, after, page_size)
+
+    def execute_adql(
+        self,
+        adql: str,
+        *,
+        max_rows: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Run free-form ADQL (MAN-827's Q5 / the ADQL tab), capped at
+        *max_rows*.
+
+        No ``page``/``page_size`` OFFSET parameter: confirmed live against
+        Argus that ``OFFSET`` is rejected outright (``invalid ADQL keyword:
+        LIMIT``), so page-N pagination over arbitrary free-form ADQL isn't
+        possible against this service today — and unlike :meth:`search`,
+        there's no ``obs_publisher_did``-style keyset fallback available
+        here either, because an arbitrary caller-supplied query has no
+        column astroquery can assume is present, sortable, or unique.
+
+        Parameters
+        ----------
+        adql : str
+            ADQL query string. If it already has its own ``TOP``, that wins;
+            *max_rows* only caps rows via ``maxrec`` on top of whatever the
+            query itself returns.
+        max_rows : int, optional
+            Row cap, via TAP's own ``maxrec``. Defaults to
+            :attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC` (same
+            default :meth:`query` uses).
+        verbose : bool, optional
+            Print *adql* before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+
+        Examples
+        --------
+        >>> DataDiscovery.execute_adql("SELECT TOP 10 * FROM ivoa.ObsCore", max_rows=10)
+        """
+        if verbose:
+            print(f"[ADQL] {adql}")
+        return self.query(adql, maxrec=max_rows)
+
+    def count_adql(
+        self,
+        adql: str,
+        *,
+        max_rows: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Row count for a free-form ADQL query (MAN-827's Q3 / the ADQL tab's
+        total), capped at *max_rows* — matching MAN-827's own stated
+        semantics for this query type ("One row: num_records, capped at the
+        query's TOP"), not an unbounded ``COUNT(*)``.
+
+        Deliberately does **not** wrap *adql* in ``SELECT COUNT(*) FROM
+        (...)``, the way the current DaCHS-backed Gateway does this today:
+        confirmed live against Argus that sub-selects in the ``FROM`` clause
+        are rejected outright (``sub-select not supported in FROM clause``).
+        Rewriting an arbitrary caller's ``SELECT`` clause via string surgery
+        to work around that would reintroduce exactly the ADQL-built-by-
+        string-interpolation risk MAN-827 itself calls out (§4) — and would
+        still silently give the wrong answer for any query with its own
+        ``GROUP BY``, where ``COUNT(*)`` over the original column list
+        doesn't mean "how many result rows". Executing the query and
+        measuring the real row count sidesteps both problems, and is exactly
+        the "capped at TOP" semantics MAN-827 describes — just arrived at by
+        running the query instead of wrapping it.
+
+        Parameters
+        ----------
+        adql : str
+            ADQL query string.
+        max_rows : int, optional
+            Row cap passed to :meth:`execute_adql`.
+        verbose : bool, optional
+            Print *adql* before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            One row: ``num_records``.
+
+        Examples
+        --------
+        >>> DataDiscovery.count_adql("SELECT * FROM ivoa.ObsCore WHERE dataproduct_type = 'image'")
+        """
+        table = self.execute_adql(adql, max_rows=max_rows, verbose=verbose)
+        return Table(rows=[{"num_records": len(table)}])
+
     def get_artifacts(self, observation_id: str) -> Table:
         """
         Return all file artifacts associated with an observation.
@@ -685,6 +1147,28 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
 def _esc(s: str) -> str:
     """Minimal ADQL string-literal escaping."""
     return s.replace("'", "''")
+
+
+def _add_namespace_filename_columns(table: Table) -> None:
+    """Best-effort split of ``obs_id`` into ``namespace``/``filename`` columns,
+    in place — mirrors the Gateway's own ``extract_filenames_and_namespaces``
+    fallback (MAN-827 §3 finding 3: nothing in the ObsCore standard requires
+    ``obs_id`` to encode ``namespace:filename``; this is only as reliable as
+    that convention holds for a given row). A row with no ``:`` gets an empty
+    ``namespace`` and the whole ``obs_id`` as ``filename``, same as the
+    Gateway's own fallback for a missing separator.
+    """
+    namespaces, filenames = [], []
+    for obs_id in table["obs_id"]:
+        text = str(obs_id)
+        if ":" in text:
+            ns, _, fn = text.partition(":")
+        else:
+            ns, fn = "", text
+        namespaces.append(ns)
+        filenames.append(fn)
+    table["namespace"] = namespaces
+    table["filename"] = filenames
 
 
 _TABLE_RE = re.compile(r'\b([a-zA-Z_]\w*\.[a-zA-Z_]\w*)\b')

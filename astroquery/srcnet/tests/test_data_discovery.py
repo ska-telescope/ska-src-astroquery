@@ -407,3 +407,322 @@ class TestQueryNaturalDd:
             dd.query_natural("show obs", verbose=True)
 
         assert "[ADQL]" in capsys.readouterr().out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAN-827 Q1-Q5 shortcuts: SearchFilters, _build_where, search, count_by,
+# explain, execute_adql, count_adql, _add_namespace_filename_columns
+# ─────────────────────────────────────────────────────────────────────────────
+
+from astroquery.srcnet.data_discovery import SearchFilters, _add_namespace_filename_columns
+
+
+class TestSearchFilters:
+    def test_all_none_by_default(self):
+        f = SearchFilters()
+        assert f.coordinates is None
+        assert f.radius is None
+        assert f.obs_publisher_did is None
+        assert f.dataproduct_type is None
+        assert f.target_name is None
+        assert f.collection is None
+        assert f.facility is None
+        assert f.instrument is None
+        assert f.namespace is None
+        assert f.filename is None
+
+
+class TestBuildWhere:
+    """_build_where() — the WHERE-clause builder shared by search/count_by/explain."""
+
+    def test_none_filters_no_conditions(self, dd):
+        assert dd._build_where(None) == []
+
+    def test_empty_filters_no_conditions(self, dd):
+        assert dd._build_where(SearchFilters()) == []
+
+    def test_position_uses_s_region_not_s_ra_s_dec(self, dd):
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        where = dd._build_where(f)
+        assert len(where) == 1
+        assert "CONTAINS(s_region, CIRCLE('ICRS', 10.0, 20.0, 0.5)) = 1" == where[0]
+        assert "s_ra" not in where[0]
+        assert "s_dec" not in where[0]
+
+    def test_position_requires_both_coordinates_and_radius(self, dd):
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"))  # no radius
+        assert dd._build_where(f) == []
+
+    def test_obs_publisher_did_in_list(self, dd):
+        where = dd._build_where(SearchFilters(obs_publisher_did=["a", "b"]))
+        assert where == ["obs_publisher_did IN ('a', 'b')"]
+
+    def test_dataproduct_type_none_omitted(self, dd):
+        assert dd._build_where(SearchFilters(dataproduct_type=None)) == []
+
+    def test_dataproduct_type_empty_string_matches_null_or_blank(self, dd):
+        where = dd._build_where(SearchFilters(dataproduct_type=""))
+        assert where == ["(dataproduct_type IS NULL OR dataproduct_type = '')"]
+
+    def test_dataproduct_type_value_exact_match_ignoring_case(self, dd):
+        where = dd._build_where(SearchFilters(dataproduct_type="image"))
+        assert where == ["UPPER(dataproduct_type) = UPPER('image')"]
+
+    def test_target_name_exact_not_substring(self, dd):
+        where = dd._build_where(SearchFilters(target_name="M31"))
+        assert where == ["UPPER(target_name) = UPPER('M31')"]
+        assert "LIKE" not in where[0]
+
+    def test_collection_facility_instrument_exact_match(self, dd):
+        f = SearchFilters(collection="JCMT", facility="JCMT", instrument="SCUBA-2")
+        where = dd._build_where(f)
+        assert "UPPER(obs_collection) = UPPER('JCMT')" in where
+        assert "UPPER(facility_name) = UPPER('JCMT')" in where
+        assert "UPPER(instrument_name) = UPPER('SCUBA-2')" in where
+
+    def test_namespace_is_prefix_match_on_obs_id(self, dd):
+        where = dd._build_where(SearchFilters(namespace="testing"))
+        assert where == ["obs_id LIKE 'testing:%'"]
+
+    def test_filename_is_suffix_match_on_obs_id(self, dd):
+        where = dd._build_where(SearchFilters(filename="foo.fits"))
+        assert where == ["obs_id LIKE '%:foo.fits'"]
+
+    def test_string_filters_escaped(self, dd):
+        where = dd._build_where(SearchFilters(target_name="O'Brien"))
+        assert "O''Brien" in where[0]
+
+    def test_multiple_filters_all_present(self, dd):
+        f = SearchFilters(collection="JCMT", dataproduct_type="image", target_name="M31")
+        where = dd._build_where(f)
+        assert len(where) == 3
+
+
+class TestExplain:
+    """explain() — same ADQL search() would run, without executing it."""
+
+    def test_no_network_call(self, dd):
+        dd.explain(SearchFilters(collection="JCMT"))
+        dd._tap.search.assert_not_called()
+
+    def test_returns_string(self, dd):
+        assert isinstance(dd.explain(), str)
+
+    def test_orders_by_publisher_did_without_position(self, dd):
+        adql = dd.explain()
+        assert "ORDER BY obs_publisher_did" in adql
+
+    def test_no_order_by_with_position(self, dd):
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        adql = dd.explain(f)
+        assert "ORDER BY" not in adql
+
+    def test_top_is_exactly_page_size_not_page_size_plus_one(self, dd):
+        # search() internally fetches page_size + 1 to detect another page;
+        # explain() must show what a user would actually run, not that detail.
+        adql = dd.explain(page_size=25)
+        assert "TOP 25 " in adql
+
+    def test_after_adds_keyset_condition(self, dd):
+        adql = dd.explain(after="abc123")
+        assert "obs_publisher_did > 'abc123'" in adql
+
+    def test_after_ignored_with_position(self, dd):
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        adql = dd.explain(f, after="abc123")
+        assert "abc123" not in adql
+
+    def test_matches_search_where_clause(self, dd):
+        # explain() and search() must never disagree -- same _build_where call.
+        f = SearchFilters(collection="JCMT")
+        explained = dd.explain(f, page_size=10)
+        with patch.object(dd, "query", return_value=Table({"obs_publisher_did": []})) as mock_query:
+            dd.search(f, page_size=10)
+        executed_adql = mock_query.call_args[0][0]
+        assert "WHERE UPPER(obs_collection) = UPPER('JCMT')" in explained
+        assert "WHERE UPPER(obs_collection) = UPPER('JCMT')" in executed_adql
+
+
+class TestSearch:
+    """search() — Q1: one shortcut for any combination of filters, keyset-paged."""
+
+    def _rows(self, n, start=0):
+        return Table({
+            "obs_publisher_did": [f"did{i:03d}" for i in range(start, start + n)],
+            "obs_id": [f"ns{i}:file{i}.fits" for i in range(start, start + n)],
+        })
+
+    def test_returns_table(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(3)):
+            result = dd.search()
+        assert isinstance(result, Table)
+
+    def test_requests_page_size_plus_one(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(page_size=10)
+        assert mock_query.call_args[1]["maxrec"] == 11
+        assert "TOP 11" in mock_query.call_args[0][0]
+
+    def test_short_page_has_no_next_after(self, dd):
+        # fewer than page_size + 1 rows back => this was the last page
+        with patch.object(dd, "query", return_value=self._rows(3)):
+            result = dd.search(page_size=10)
+        assert len(result) == 3
+        assert result.meta["next_after"] is None
+
+    def test_full_extra_row_sets_next_after_and_trims(self, dd):
+        # page_size + 1 rows back => there's another page; result trimmed to page_size
+        with patch.object(dd, "query", return_value=self._rows(4)):
+            result = dd.search(page_size=3)
+        assert len(result) == 3
+        assert result.meta["next_after"] == "did002"  # last row AFTER trimming
+
+    def test_position_search_never_sets_next_after(self, dd):
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        with patch.object(dd, "query", return_value=self._rows(4)):
+            result = dd.search(f, page_size=3)
+        assert result.meta["next_after"] is None
+
+    def test_split_obs_id_default_adds_columns(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(2)):
+            result = dd.search()
+        assert "namespace" in result.colnames
+        assert "filename" in result.colnames
+        assert result["namespace"][0] == "ns0"
+        assert result["filename"][0] == "file0.fits"
+
+    def test_split_obs_id_false_skips_columns(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(2)):
+            result = dd.search(split_obs_id=False)
+        assert "namespace" not in result.colnames
+
+    def test_with_total_count_makes_second_query(self, dd):
+        count_table = Table({"num_records": [42]})
+        page_table = self._rows(2)
+        with patch.object(dd, "query", side_effect=[page_table, count_table]) as mock_query:
+            result = dd.search(SearchFilters(collection="JCMT"), with_total_count=True)
+        assert mock_query.call_count == 2
+        count_adql = mock_query.call_args_list[1][0][0]
+        assert "COUNT(*)" in count_adql
+        assert "FROM (" not in count_adql  # no sub-select -- Argus rejects it
+        assert result.meta["total_count"] == 42
+
+    def test_without_total_count_makes_one_query(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(2)) as mock_query:
+            dd.search()
+        assert mock_query.call_count == 1
+
+    def test_verbose_prints_adql(self, dd, capsys):
+        with patch.object(dd, "query", return_value=self._rows(1)):
+            dd.search(verbose=True)
+        assert "[ADQL]" in capsys.readouterr().out
+
+    def test_after_passed_through_as_keyset_cursor(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(1)) as mock_query:
+            dd.search(after="did005")
+        assert "obs_publisher_did > 'did005'" in mock_query.call_args[0][0]
+
+
+class TestCountBy:
+    """count_by() — Q2: grouped counts for the same filter set search() takes."""
+
+    def test_default_group_by_dataproduct_type(self, dd):
+        with patch.object(dd, "query", return_value=Table({"dataproduct_type": [], "num_records": []})) as mock_query:
+            dd.count_by()
+        adql = mock_query.call_args[0][0]
+        assert "GROUP BY dataproduct_type" in adql
+
+    def test_custom_group_by_fields(self, dd):
+        with patch.object(dd, "query", return_value=Table({"a": [], "b": [], "num_records": []})) as mock_query:
+            dd.count_by(group_by=["dataproduct_type", "facility_name"])
+        adql = mock_query.call_args[0][0]
+        assert "GROUP BY dataproduct_type, facility_name" in adql
+        assert "SELECT dataproduct_type, facility_name, COUNT(*) AS num_records" in adql
+
+    def test_filters_applied(self, dd):
+        with patch.object(dd, "query", return_value=Table({"dataproduct_type": [], "num_records": []})) as mock_query:
+            dd.count_by(filters=SearchFilters(collection="JCMT"))
+        adql = mock_query.call_args[0][0]
+        assert "WHERE UPPER(obs_collection) = UPPER('JCMT')" in adql
+
+    def test_verbose_prints_adql(self, dd, capsys):
+        with patch.object(dd, "query", return_value=Table({"dataproduct_type": [], "num_records": []})):
+            dd.count_by(verbose=True)
+        assert "[ADQL]" in capsys.readouterr().out
+
+
+class TestExecuteAdql:
+    """execute_adql() — Q5: run free-form ADQL, capped by max_rows (no OFFSET)."""
+
+    def test_passes_adql_through_unchanged(self, dd):
+        adql = "SELECT TOP 5 * FROM ivoa.ObsCore"
+        with patch.object(dd, "query", return_value=Table({"obs_id": []})) as mock_query:
+            dd.execute_adql(adql)
+        assert mock_query.call_args[0][0] == adql
+
+    def test_max_rows_passed_as_maxrec(self, dd):
+        with patch.object(dd, "query", return_value=Table({"obs_id": []})) as mock_query:
+            dd.execute_adql("SELECT * FROM ivoa.ObsCore", max_rows=25)
+        assert mock_query.call_args[1]["maxrec"] == 25
+
+    def test_verbose_prints_adql(self, dd, capsys):
+        with patch.object(dd, "query", return_value=Table({"obs_id": []})):
+            dd.execute_adql("SELECT * FROM ivoa.ObsCore", verbose=True)
+        assert "[ADQL]" in capsys.readouterr().out
+
+
+class TestCountAdql:
+    """count_adql() — Q3: capped row count, by executing + measuring (no sub-select)."""
+
+    def test_returns_one_row_with_num_records(self, dd):
+        with patch.object(dd, "execute_adql", return_value=Table({"obs_id": ["a", "b", "c"]})):
+            result = dd.count_adql("SELECT obs_id FROM ivoa.ObsCore")
+        assert len(result) == 1
+        assert result["num_records"][0] == 3
+
+    def test_does_not_wrap_in_sub_select(self, dd):
+        # Argus rejects sub-selects in FROM outright -- confirmed live.
+        # count_adql must send the caller's ADQL to execute_adql unmodified,
+        # never "SELECT COUNT(*) FROM (...)".
+        adql = "SELECT obs_id FROM ivoa.ObsCore WHERE dataproduct_type = 'image'"
+        with patch.object(dd, "execute_adql", return_value=Table({"obs_id": []})) as mock_execute:
+            dd.count_adql(adql)
+        assert mock_execute.call_args[0][0] == adql
+
+    def test_max_rows_forwarded(self, dd):
+        with patch.object(dd, "execute_adql", return_value=Table({"obs_id": []})) as mock_execute:
+            dd.count_adql("SELECT obs_id FROM ivoa.ObsCore", max_rows=100)
+        assert mock_execute.call_args[1]["max_rows"] == 100
+
+    def test_zero_rows(self, dd):
+        with patch.object(dd, "execute_adql", return_value=Table({"obs_id": []})):
+            result = dd.count_adql("SELECT obs_id FROM ivoa.ObsCore")
+        assert result["num_records"][0] == 0
+
+
+class TestAddNamespaceFilenameColumns:
+    """_add_namespace_filename_columns() — best-effort obs_id split."""
+
+    def test_splits_on_first_colon(self):
+        t = Table({"obs_id": ["testing:PTF10tce.fits"]})
+        _add_namespace_filename_columns(t)
+        assert t["namespace"][0] == "testing"
+        assert t["filename"][0] == "PTF10tce.fits"
+
+    def test_no_colon_falls_back_to_empty_namespace(self):
+        t = Table({"obs_id": ["plainname.fits"]})
+        _add_namespace_filename_columns(t)
+        assert t["namespace"][0] == ""
+        assert t["filename"][0] == "plainname.fits"
+
+    def test_splits_on_first_colon_only(self):
+        t = Table({"obs_id": ["ns:sub:file.fits"]})
+        _add_namespace_filename_columns(t)
+        assert t["namespace"][0] == "ns"
+        assert t["filename"][0] == "sub:file.fits"
+
+    def test_empty_table(self):
+        t = Table({"obs_id": []})
+        _add_namespace_filename_columns(t)  # must not raise
+        assert "namespace" in t.colnames
+        assert "filename" in t.colnames
