@@ -660,6 +660,53 @@ instrument, and target name — no ADQL required.
     ...     target_name="Orion",
     ... )
 
+SearchFilters, search, count_by, explain
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``SearchFilters`` is a single filter object shared by ``search``, ``count_by``
+and ``explain`` — set any combination of its fields (or none) and all three
+interpret it identically, unlike ``query_region``/``query_name``/
+``query_observations`` above, which each take their own separate keyword
+arguments and can't be combined in one call. Available fields: ``coordinates``
++ ``radius`` (cone search), ``obs_publisher_did`` (list, exact match),
+``dataproduct_type``, ``target_name``, ``collection``, ``facility``,
+``instrument`` (all exact match, ignoring case — narrower than
+``query_observations``'s substring matching), and ``namespace``/``filename``
+(Rucio DID split, matched on ``obs_id``). See the ``SearchFilters`` docstring
+(``help(SearchFilters)``) for the full field-by-field reference, including
+match rules and caveats.
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import DataDiscovery, SearchFilters
+
+    >>> filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+    >>> t = DataDiscovery.search(filters, page_size=50)
+
+``search`` paginates by keyset, not by page number: pass the previous page's
+``t.meta["next_after"]`` back in as ``after`` to get the next page (``None``
+once there are no more rows). Pass ``with_total_count=True`` to also get a
+filter-scoped row count in ``t.meta["total_count"]``.
+
+.. code-block:: python
+
+    >>> page1 = DataDiscovery.search(filters, page_size=50, with_total_count=True)
+    >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+
+``count_by`` returns grouped counts for the same filter object:
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.count_by(["dataproduct_type", "facility_name"], filters)
+
+``explain`` returns the ADQL ``search`` would run for a given filter set,
+without executing it — useful for a "show me the query" step before running it:
+
+.. code-block:: python
+
+    >>> print(DataDiscovery.explain(filters))
+    SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') AND ...
+
 get_artifacts
 ^^^^^^^^^^^^^
 
@@ -684,6 +731,29 @@ Execute an arbitrary ADQL statement against the CAOM2 TAP service.
     ...     GROUP BY o.collection
     ...     ORDER BY n DESC
     ... """)
+
+execute_adql, count_adql
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Named alternatives to ``query`` for free-form ADQL, row-capped rather than
+paginated — the TAP service the SRCNet Data Discovery client targets rejects
+``OFFSET`` outright, so there is no page-number pagination for a free-form
+query the way there is for ``search`` above (keyset pagination via ``after``).
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.execute_adql("SELECT TOP 20 * FROM ivoa.ObsCore", max_rows=20)
+
+``count_adql`` returns a row count for a free-form query by executing it and
+measuring the result, capped at ``max_rows`` — not an unbounded ``COUNT(*)``,
+and deliberately not implemented as the more familiar
+``SELECT COUNT(*) FROM (...)`` wrapping trick, since the same TAP service also
+rejects sub-selects in ``FROM`` outright.
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.count_adql("SELECT * FROM ivoa.ObsCore WHERE dataproduct_type = 'image'")
+    >>> t["num_records"][0]
 
 nl_to_adql (data)
 ^^^^^^^^^^^^^^^^^
