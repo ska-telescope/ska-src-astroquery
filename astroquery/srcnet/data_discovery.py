@@ -585,15 +585,23 @@ class DataDiscoveryClass:
         filters: Optional[SearchFilters],
         columns: str,
         after: Optional[str],
-        top_n: int,
+        top_n: Optional[int],
     ) -> str:
         """The ADQL both :meth:`search` and :meth:`explain` build — one
-        function, so they can never disagree with each other."""
+        function, so they can never disagree with each other.
+
+        ``top_n=None`` means unbounded: no ``TOP`` clause at all (the caller
+        relies on ``maxrec`` alone, same as :meth:`query`/:meth:`execute_adql`)
+        — *after* is meaningless without a page boundary, so it's ignored in
+        that case rather than silently building a WHERE clause nothing will
+        ever page through.
+        """
         where = self._build_where(filters)
-        if after and not self._has_position(filters):
+        if after and top_n is not None and not self._has_position(filters):
             where = where + [f"obs_publisher_did > '{_esc(after)}'"]
 
-        adql = f"SELECT TOP {top_n} {columns} FROM {self.OBSCORE_TABLE}"
+        select = f"SELECT {columns}" if top_n is None else f"SELECT TOP {top_n} {columns}"
+        adql = f"{select} FROM {self.OBSCORE_TABLE}"
         if where:
             adql += " WHERE " + " AND ".join(where)
         if not self._has_position(filters):
@@ -606,7 +614,7 @@ class DataDiscoveryClass:
         *,
         columns: Optional[str] = None,
         after: Optional[str] = None,
-        page_size: int = 100,
+        page_size: Optional[int] = 100,
         split_obs_id: bool = True,
         with_total_count: bool = False,
         verbose: bool = False,
@@ -633,6 +641,18 @@ class DataDiscoveryClass:
         just returns up to *page_size* rows with no further pages, rather
         than claim an ordering this service can't produce.
 
+        Pagination is opt-in, not the only mode: pass ``page_size=None`` for
+        an unbounded search — no ``TOP`` at all, just ``maxrec`` as a plain
+        safety cap (:attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC`,
+        the same default :meth:`query`/:meth:`execute_adql` use), with no
+        pagination bookkeeping at all (``next_after`` is always ``None``, and
+        *after* is ignored — there's no page boundary for it to mean anything
+        against). Reach for this when you just want everything matching the
+        filters and don't care about paging through a UI-sized page at a
+        time — the default ``page_size=100`` exists for the latter case
+        (MAN-827's own contract for this shortcut is literally "a page of
+        rows"), not because every caller needs pagination.
+
         Parameters
         ----------
         filters : SearchFilters, optional
@@ -641,9 +661,9 @@ class DataDiscoveryClass:
         columns : str, optional
             ADQL column list. Defaults to :attr:`DEFAULT_SEARCH_COLUMNS`.
         after : str, optional
-            Keyset cursor — see above.
-        page_size : int, optional
-            Max rows this call returns.
+            Keyset cursor — see above. Ignored when *page_size* is ``None``.
+        page_size : int or None, optional
+            Max rows this call returns. ``None`` = unbounded (see above).
         split_obs_id : bool, optional
             Also add ``namespace``/``filename`` columns, split from ``obs_id``
             on the first ``:`` — the same convention-dependent split the
@@ -662,27 +682,31 @@ class DataDiscoveryClass:
         -------
         `~astropy.table.Table`
             ``table.meta["next_after"]`` is the cursor for the next page, or
-            ``None`` if this was the last one. ``table.meta["total_count"]``
-            is present only when *with_total_count* is true.
+            ``None`` if this was the last one (always ``None`` when
+            *page_size* is ``None``). ``table.meta["total_count"]`` is
+            present only when *with_total_count* is true.
 
         Examples
         --------
         >>> filters = SearchFilters(collection="JCMT", dataproduct_type="image")
         >>> page1 = DataDiscovery.search(filters, page_size=50)
         >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+        >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
         """
         columns = columns or self.DEFAULT_SEARCH_COLUMNS
         has_position = self._has_position(filters)
+        unbounded = page_size is None
         # Fetch one extra row to learn whether another page exists, without a
         # second round trip or an OFFSET this service doesn't support; trimmed
         # back to page_size before returning. Only for the keyset-paginated
         # case: a position search never exposes a next page (next_after is
         # forced to None below regardless -- see the class docstring), so
         # asking for one more row there would just fetch something we always
-        # throw away. fetch_n is also what explain() must show for parity --
-        # it takes the same has_position-dependent value, so what explain()
-        # displays and what search() actually runs never diverge.
-        fetch_n = page_size if has_position else page_size + 1
+        # throw away -- likewise unbounded mode has no "next page" to detect
+        # at all. fetch_n is also what explain() must show for parity -- it
+        # takes the same has_position/unbounded-dependent value, so what
+        # explain() displays and what search() actually runs never diverge.
+        fetch_n = None if unbounded else (page_size if has_position else page_size + 1)
         adql = self._search_adql(filters, columns, after, fetch_n)
 
         if verbose:
@@ -690,7 +714,7 @@ class DataDiscoveryClass:
 
         table = self.query(adql, maxrec=fetch_n)
 
-        has_more = (not has_position) and len(table) > page_size
+        has_more = (not unbounded) and (not has_position) and len(table) > page_size
         if has_more:
             table = table[:page_size]
 
@@ -699,7 +723,7 @@ class DataDiscoveryClass:
 
         table.meta["next_after"] = (
             str(table["obs_publisher_did"][-1])
-            if has_more and not has_position and len(table) and "obs_publisher_did" in table.colnames
+            if has_more and len(table) and "obs_publisher_did" in table.colnames
             else None
         )
 
@@ -763,7 +787,7 @@ class DataDiscoveryClass:
         *,
         columns: Optional[str] = None,
         after: Optional[str] = None,
-        page_size: int = 100,
+        page_size: Optional[int] = 100,
     ) -> str:
         """
         Return the ADQL :meth:`search` would run for *filters*, without
@@ -771,11 +795,13 @@ class DataDiscoveryClass:
 
         Built through the exact same :meth:`_search_adql` helper
         :meth:`search` uses, so this can never drift out of sync with what
-        ``search(filters)`` actually does. The one difference: this shows
-        ``TOP page_size``, not the ``page_size + 1`` :meth:`search` fetches
-        internally to detect whether another page exists — that's an
-        implementation detail of pagination, not something a user editing
-        this ADQL in a "show query" modal should see.
+        ``search(filters)`` actually does. The one difference: for a
+        keyset-paginated (non-position) search this shows ``TOP page_size``,
+        not the ``page_size + 1`` :meth:`search` fetches internally to detect
+        whether another page exists — that's an implementation detail of
+        pagination, not something a user editing this ADQL in a "show query"
+        modal should see. Pass ``page_size=None`` to see the unbounded form
+        (no ``TOP`` at all) that ``search(filters, page_size=None)`` runs.
 
         Parameters
         ----------
@@ -785,8 +811,9 @@ class DataDiscoveryClass:
             Same as :meth:`search`.
         after : str, optional
             Same as :meth:`search`.
-        page_size : int, optional
-            Same as :meth:`search` — shown here as the real ``TOP`` value.
+        page_size : int or None, optional
+            Same as :meth:`search` — shown here as the real ``TOP`` value
+            (or no ``TOP`` at all when ``None``).
 
         Returns
         -------
