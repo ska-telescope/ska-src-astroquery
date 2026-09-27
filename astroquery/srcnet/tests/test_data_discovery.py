@@ -583,6 +583,29 @@ class TestSearch:
             result = dd.search(f, page_size=3)
         assert result.meta["next_after"] is None
 
+    def test_position_search_requests_exactly_page_size_not_plus_one(self, dd):
+        # A position search never exposes a next page (previous test), so the
+        # +1-to-detect-another-page trick buys it nothing -- asking for one
+        # more row than the caller requested was a real, needless bug once
+        # spotted live (page_size=100 default produced "TOP 101").
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(f, page_size=10)
+        assert mock_query.call_args[1]["maxrec"] == 10
+        assert "TOP 10 " in mock_query.call_args[0][0]
+        assert "TOP 11" not in mock_query.call_args[0][0]
+
+    def test_position_search_matches_explain_exactly(self, dd):
+        # search() and explain() must agree on what TOP value a position
+        # search actually runs -- they didn't before the fix above (explain()
+        # already showed the plain page_size; search() silently asked for
+        # page_size + 1 regardless of has_position).
+        f = SearchFilters(coordinates=SkyCoord(10.0, 20.0, unit="deg"), radius=0.5 * u.deg)
+        explained = dd.explain(f, page_size=10)
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(f, page_size=10)
+        assert mock_query.call_args[0][0] == explained
+
     def test_split_obs_id_default_adds_columns(self, dd):
         with patch.object(dd, "query", return_value=self._rows(2)):
             result = dd.search()

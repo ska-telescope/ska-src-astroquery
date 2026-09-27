@@ -675,15 +675,22 @@ class DataDiscoveryClass:
         has_position = self._has_position(filters)
         # Fetch one extra row to learn whether another page exists, without a
         # second round trip or an OFFSET this service doesn't support; trimmed
-        # back to page_size before returning.
-        adql = self._search_adql(filters, columns, after, page_size + 1)
+        # back to page_size before returning. Only for the keyset-paginated
+        # case: a position search never exposes a next page (next_after is
+        # forced to None below regardless -- see the class docstring), so
+        # asking for one more row there would just fetch something we always
+        # throw away. fetch_n is also what explain() must show for parity --
+        # it takes the same has_position-dependent value, so what explain()
+        # displays and what search() actually runs never diverge.
+        fetch_n = page_size if has_position else page_size + 1
+        adql = self._search_adql(filters, columns, after, fetch_n)
 
         if verbose:
             print(f"[ADQL] {adql}")
 
-        table = self.query(adql, maxrec=page_size + 1)
+        table = self.query(adql, maxrec=fetch_n)
 
-        has_more = len(table) > page_size
+        has_more = (not has_position) and len(table) > page_size
         if has_more:
             table = table[:page_size]
 
