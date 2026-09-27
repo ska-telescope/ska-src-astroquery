@@ -603,6 +603,16 @@ filter-scoped row count in ``t.meta["total_count"]``.
     >>> page1 = DataDiscovery.search(filters, page_size=50, with_total_count=True)
     >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
 
+Pagination is opt-in, not the only mode — pass ``page_size=None`` for an
+unbounded search (no ``TOP`` at all, just the same ``maxrec`` safety cap
+``query``/``execute_adql`` already use by default) when you just want
+everything matching the filters and don't care about paging through a
+UI-sized page at a time:
+
+.. code-block:: python
+
+    >>> everything = DataDiscovery.search(filters, page_size=None)
+
 ``count_by`` returns grouped counts for the same filter object:
 
 .. code-block:: python

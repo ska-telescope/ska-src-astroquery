@@ -646,6 +646,65 @@ class TestSearch:
         assert "obs_publisher_did > 'did005'" in mock_query.call_args[0][0]
 
 
+class TestSearchUnbounded:
+    """search(page_size=None) — opt out of pagination entirely, matching how
+    query()/execute_adql() already behave by default (maxrec-only, no TOP)."""
+
+    def _rows(self, n):
+        return Table({
+            "obs_publisher_did": [f"did{i:03d}" for i in range(n)],
+            "obs_id": [f"ns{i}:file{i}.fits" for i in range(n)],
+        })
+
+    def test_no_top_in_adql(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(page_size=None)
+        adql = mock_query.call_args[0][0]
+        assert "TOP" not in adql
+
+    def test_maxrec_is_none_delegates_to_query_default(self, dd):
+        # query()'s own default (conf.SRCNET_DEFAULT_MAXREC) applies, the same
+        # as execute_adql() -- search() shouldn't invent a second default cap.
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(page_size=None)
+        assert mock_query.call_args[1]["maxrec"] is None
+
+    def test_never_sets_next_after(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(50)):
+            result = dd.search(page_size=None)
+        assert result.meta["next_after"] is None
+
+    def test_after_is_ignored(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(after="did005", page_size=None)
+        assert "did005" not in mock_query.call_args[0][0]
+
+    def test_does_not_trim_results(self, dd):
+        # No page boundary to trim to -- every row query() returns comes back.
+        with patch.object(dd, "query", return_value=self._rows(500)):
+            result = dd.search(page_size=None)
+        assert len(result) == 500
+
+    def test_still_orders_deterministically_without_position(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(page_size=None)
+        assert "ORDER BY obs_publisher_did" in mock_query.call_args[0][0]
+
+    def test_with_total_count_still_works(self, dd):
+        count_table = Table({"num_records": [500]})
+        page_table = self._rows(3)
+        with patch.object(dd, "query", side_effect=[page_table, count_table]):
+            result = dd.search(page_size=None, with_total_count=True)
+        assert result.meta["total_count"] == 500
+
+    def test_explain_matches_search_exactly(self, dd):
+        f = SearchFilters(collection="JCMT")
+        explained = dd.explain(f, page_size=None)
+        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
+            dd.search(f, page_size=None)
+        assert mock_query.call_args[0][0] == explained
+
+
 class TestCountBy:
     """count_by() — Q2: grouped counts for the same filter set search() takes."""
 
