@@ -504,6 +504,33 @@ class TestSearchFilters:
         with pytest.raises(ValueError, match="unknown ivoa.ObsCore column"):
             SearchFilters().set_order("not_a_real_column")
 
+    def test_case_sensitive_defaults_false(self):
+        f = SearchFilters().add_filter("collection", "JCMT")
+        assert f.is_case_sensitive("collection") is False
+
+    def test_case_sensitive_true_recorded(self):
+        f = SearchFilters().add_filter("collection", "JCMT", case_sensitive=True)
+        assert f.is_case_sensitive("collection") is True
+
+    def test_case_sensitive_per_field_independent(self):
+        f = (
+            SearchFilters()
+            .add_filter("collection", "JCMT", case_sensitive=True)
+            .add_filter("target_name", "M31")
+        )
+        assert f.is_case_sensitive("collection") is True
+        assert f.is_case_sensitive("target_name") is False
+
+    def test_is_case_sensitive_false_for_unset_field(self):
+        assert SearchFilters().is_case_sensitive("collection") is False
+
+    @pytest.mark.parametrize("field", ["position", "obs_publisher_did", "namespace", "filename"])
+    def test_case_sensitive_raises_on_unsupported_field(self, field):
+        value = (SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg) if field == "position" else "x"
+        value = ["x"] if field == "obs_publisher_did" else value
+        with pytest.raises(ValueError, match="case_sensitive only applies to"):
+            SearchFilters().add_filter(field, value, case_sensitive=True)
+
 
 class TestBuildWhere:
     """_build_where() — the WHERE-clause builder shared by search/count_by/explain."""
@@ -569,6 +596,49 @@ class TestBuildWhere:
         f = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image").add_filter("target_name", "M31")
         where = dd._build_where(f)
         assert len(where) == 3
+
+    def test_case_sensitive_collection_drops_upper(self, dd):
+        f = SearchFilters().add_filter("collection", "JCMT", case_sensitive=True)
+        where = dd._build_where(f)
+        assert where == ["obs_collection = 'JCMT'"]
+        assert "UPPER" not in where[0]
+
+    def test_case_sensitive_dataproduct_type_drops_upper(self, dd):
+        f = SearchFilters().add_filter("dataproduct_type", "image", case_sensitive=True)
+        assert dd._build_where(f) == ["dataproduct_type = 'image'"]
+
+    def test_case_sensitive_target_name_facility_instrument_drop_upper(self, dd):
+        f = (
+            SearchFilters()
+            .add_filter("target_name", "M31", case_sensitive=True)
+            .add_filter("facility", "JCMT", case_sensitive=True)
+            .add_filter("instrument", "SCUBA-2", case_sensitive=True)
+        )
+        where = dd._build_where(f)
+        assert "target_name = 'M31'" in where
+        assert "facility_name = 'JCMT'" in where
+        assert "instrument_name = 'SCUBA-2'" in where
+
+    def test_case_sensitive_blank_dataproduct_type_unaffected(self, dd):
+        # "" already means IS NULL OR = '' regardless of case_sensitive -- there's
+        # no UPPER() to drop in that branch.
+        f = SearchFilters().add_filter("dataproduct_type", "", case_sensitive=True)
+        assert dd._build_where(f) == ["(dataproduct_type IS NULL OR dataproduct_type = '')"]
+
+    def test_case_sensitive_escaped(self, dd):
+        f = SearchFilters().add_filter("target_name", "O'Brien", case_sensitive=True)
+        where = dd._build_where(f)
+        assert where == ["target_name = 'O''Brien'"]
+
+    def test_mixed_case_sensitive_and_default_fields(self, dd):
+        f = (
+            SearchFilters()
+            .add_filter("collection", "JCMT", case_sensitive=True)
+            .add_filter("target_name", "M31")
+        )
+        where = dd._build_where(f)
+        assert "obs_collection = 'JCMT'" in where
+        assert "UPPER(target_name) = UPPER('M31')" in where
 
 
 class TestExplain:

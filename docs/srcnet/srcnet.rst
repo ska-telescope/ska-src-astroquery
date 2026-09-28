@@ -705,6 +705,27 @@ A cone search sets the ``position`` field the same way, either via
     ... )
     >>> t = DataDiscovery.search(pos_filters, page_size=50)
 
+``dataproduct_type``, ``target_name``, ``collection``, ``facility`` and
+``instrument`` match case-insensitively by default (``UPPER(col) = UPPER('value')``).
+``UPPER(col)`` *can* cost more than a plain ``col = 'value'`` comparison on a
+TAP service backed by a real database, since it can prevent the query planner
+from using a plain index on *col*. Paired timing tests against a populated
+Argus deployment gave contradictory results in both directions, though — response-time
+variance on that shared, third-party service was larger than whatever effect
+``UPPER()`` has on its own — so treat ``case_sensitive`` as an untested-but-plausible
+optimization to try on your own deployment, not a guaranteed speedup. Pass
+``case_sensitive=True`` when you know the value is consistently cased in your
+data (collection codes usually are) to get a plain ``col = 'value'`` comparison
+instead:
+
+.. code-block:: python
+
+    >>> filters = SearchFilters().add_filter("collection", "JCMT", case_sensitive=True)
+
+``add_filter`` raises ``ValueError`` if ``case_sensitive`` is passed for a field
+that has no case-insensitive default to opt out of (``position``,
+``obs_publisher_did``, ``namespace``, ``filename``).
+
 ``search`` paginates by keyset, not by page number: pass the previous page's
 ``t.meta["next_after"]`` back in as ``after`` to get the next page (``None``
 once there are no more rows). Pass ``with_total_count=True`` to also get a
@@ -714,6 +735,24 @@ filter-scoped row count in ``t.meta["total_count"]``.
 
     >>> page1 = DataDiscovery.search(filters, page_size=50, with_total_count=True)
     >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+
+There's no way to jump straight to page *N* the way ``OFFSET`` would (confirmed
+live that this TAP service rejects ``OFFSET`` outright), so getting to a
+specific page means walking forward one page at a time until you reach it:
+
+.. code-block:: python
+
+    >>> def get_page(filters, n, page_size=50):
+    ...     """Walk forward to page n (1-indexed) via the keyset cursor."""
+    ...     after = None
+    ...     for _ in range(n):
+    ...         page = DataDiscovery.search(filters, page_size=page_size, after=after)
+    ...         after = page.meta["next_after"]
+    ...         if after is None:
+    ...             break  # ran out of rows before reaching page n
+    ...     return page
+
+    >>> page3 = get_page(filters, 3, page_size=50)
 
 Pagination is opt-in, not the only mode — pass ``page_size=None`` for an
 unbounded search (no ``TOP`` at all, just the same ``maxrec`` safety cap
