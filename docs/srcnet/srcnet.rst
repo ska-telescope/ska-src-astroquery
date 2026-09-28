@@ -574,24 +574,46 @@ SearchFilters, search, count_by, explain
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``SearchFilters`` is a single filter object shared by ``search``, ``count_by``
-and ``explain`` — set any combination of its fields (or none) and all three
-interpret it identically, unlike ``query_region``/``query_name``/
-``query_observations`` above, which each take their own separate keyword
-arguments and can't be combined in one call. Available fields: ``coordinates``
-+ ``radius`` (cone search), ``obs_publisher_did`` (list, exact match),
-``dataproduct_type``, ``target_name``, ``collection``, ``facility``,
-``instrument`` (all exact match, ignoring case — narrower than
+and ``explain`` — build it up with ``add_filter(field, value)`` (chainable —
+each call returns ``self``) rather than passing every field as a constructor
+keyword, and all three methods interpret it identically, unlike
+``query_region``/``query_name``/``query_observations`` above, which each take
+their own separate keyword arguments and can't be combined in one call.
+Available fields: ``position`` (a ``(coordinates, radius)`` tuple — or use the
+``set_position(coordinates, radius)`` convenience wrapper), ``obs_publisher_did``
+(list, exact match), ``dataproduct_type``, ``target_name``, ``collection``,
+``facility``, ``instrument`` (all exact match, ignoring case — narrower than
 ``query_observations``'s substring matching), and ``namespace``/``filename``
-(Rucio DID split, matched on ``obs_id``). See the ``SearchFilters`` docstring
-(``help(SearchFilters)``) for the full field-by-field reference, including
-match rules and caveats.
+(Rucio DID split, matched on ``obs_id``). ``add_filter`` raises ``ValueError``
+on an unrecognized field name rather than silently no-op'ing (so a typo like
+``"colection"`` fails loudly instead of quietly matching more than intended).
+See the ``SearchFilters`` docstring (``help(SearchFilters)``) for the full
+field-by-field reference, including match rules and caveats.
 
 .. code-block:: python
 
     >>> from astroquery.srcnet import DataDiscovery, SearchFilters
 
-    >>> filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+    >>> filters = (
+    ...     SearchFilters()
+    ...     .add_filter("collection", "JCMT")
+    ...     .add_filter("dataproduct_type", "image")
+    ...     .add_filter("instrument", "SCUBA-2")
+    ... )
     >>> t = DataDiscovery.search(filters, page_size=50)
+
+A cone search sets the ``position`` field the same way, either via
+``add_filter`` directly or the ``set_position`` shortcut:
+
+.. code-block:: python
+
+    >>> from astropy.coordinates import SkyCoord
+    >>> import astropy.units as u
+
+    >>> pos_filters = SearchFilters().set_position(
+    ...     SkyCoord(83.8, -5.4, unit="deg"), 0.5 * u.deg
+    ... )
+    >>> t = DataDiscovery.search(pos_filters, page_size=50)
 
 ``search`` paginates by keyset, not by page number: pass the previous page's
 ``t.meta["next_after"]`` back in as ``after`` to get the next page (``None``
@@ -612,6 +634,20 @@ UI-sized page at a time:
 .. code-block:: python
 
     >>> everything = DataDiscovery.search(filters, page_size=None)
+
+By default, results are ordered by ``obs_publisher_did`` (the keyset
+pagination cursor). Order by any other ``ivoa.ObsCore`` column instead with
+``set_order(field, direction)`` — confirmed live against the SRCNet TAP
+service that a custom ``ORDER BY`` is *not* affected by the ``OFFSET``
+restriction above; it combines with keyset pagination too, via a
+tie-breaking ``obs_publisher_did`` secondary sort so ordering stays
+deterministic even when *field* has duplicate values:
+
+.. code-block:: python
+
+    >>> filters.set_order("t_min", "DESC")  # chains, like add_filter
+    >>> t = DataDiscovery.search(filters, page_size=50)
+    >>> t2 = DataDiscovery.search(filters, page_size=50, after=t.meta["next_after"])
 
 ``count_by`` returns grouped counts for the same filter object:
 

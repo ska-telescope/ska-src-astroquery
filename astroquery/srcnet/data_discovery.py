@@ -31,7 +31,7 @@ Simple usage via the module singleton::
     print(adql)
 
     # Typed shortcuts (no ADQL to write) -- any combination of filters
-    filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+    filters = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image")
     results = DataDiscovery.search(filters)
     counts = DataDiscovery.count_by(["dataproduct_type"], filters)
     adql = DataDiscovery.explain(filters)  # what search() would run, unexecuted
@@ -46,8 +46,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import pyvo
@@ -89,6 +88,34 @@ except ImportError:
         "  access_format      - MIME type of the data product\n"
     )
 
+
+def _parse_obscore_columns(schema_text: str) -> frozenset:
+    """Real ``ivoa.ObsCore`` column names, parsed out of the same schema block
+    used for the NL prompt above -- so :meth:`SearchFilters.set_order`'s
+    validation reflects the actual, live-introspected schema (see
+    ``schemas.py``'s own header: auto-generated from a live TAP query), not a
+    second, hand-maintained list that could drift from it.
+    """
+    columns: list = []
+    in_block = False
+    for line in schema_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ivoa.ObsCore") and not stripped.startswith("ivoa.ObsCore_radio"):
+            in_block = True
+            continue
+        if in_block:
+            if not stripped:
+                break
+            match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)", stripped)
+            if match:
+                columns.append(match.group(1))
+    return frozenset(columns)
+
+
+#: Every real column on ivoa.ObsCore -- valid targets for
+#: :meth:`SearchFilters.set_order`.
+_OBSCORE_COLUMNS = _parse_obscore_columns(_TAP_OBSCORE_SCHEMA)
+
 _NL_TO_ADQL_PROMPT = (
     "You are an expert in ADQL (Astronomical Data Query Language), which is a superset\n"
     "of SQL used to query astronomical TAP services.\n"
@@ -112,18 +139,30 @@ _NL_TO_ADQL_PROMPT = (
 
 # ── Shared filter object ───────────────────────────────────────────────────────
 
-@dataclass
 class SearchFilters:
     """
     Shared filter object for :meth:`DataDiscoveryClass.search`,
     :meth:`~DataDiscoveryClass.count_by` and :meth:`~DataDiscoveryClass.explain`.
 
-    Every field is optional and independent — set any combination, or none, and
-    it applies equally to all three methods (they build the WHERE clause
-    through the exact same internal helper, so they can never disagree on what
-    a given filter set means).
+    Construct empty and add filters incrementally with :meth:`add_filter`
+    (chainable — each call returns *self*), rather than setting every field as
+    a constructor keyword. Every field is optional and independent — add any
+    combination, or none, and it applies equally to all three methods (they
+    build the WHERE clause through the exact same internal helper, so they can
+    never disagree on what a given filter set means).
 
-    Deliberately does not include a ``project`` field: no such column exists
+    Examples
+    --------
+    >>> filters = (
+    ...     SearchFilters()
+    ...     .add_filter("collection", "JCMT")
+    ...     .add_filter("dataproduct_type", "image")
+    ...     .add_filter("obs_publisher_did", ["did:1", "did:2"])
+    ...     .set_order("t_exptime", "DESC")
+    ... )
+    >>> filters = SearchFilters().set_position(SkyCoord(83.8, -5.4, unit="deg"), 0.5 * u.deg)
+
+    Deliberately does not accept a ``project`` filter: no such column exists
     yet on Argus's ``ivoa.ObsCore`` (confirmed live —
     ``Column: [dataproduct_subtype] does not exist``, the field DaCHS used to
     hold it), and it's still an open question where "project" would even live
@@ -135,45 +174,166 @@ class SearchFilters:
     methods; it does not change ``query_observations``/``query_name`` or their
     existing callers.
 
-    Attributes
-    ----------
-    coordinates : `~astropy.coordinates.SkyCoord`, optional
-        Cone-search centre (ICRS). Requires *radius* too.
-    radius : `~astropy.units.Quantity`, optional
-        Cone-search radius, e.g. ``0.5 * u.deg``.
-    obs_publisher_did : list of str, optional
+    Filter fields (each set via ``add_filter(field, value)``)
+    ------------------------------------------------------------
+    position : ``(coordinates, radius)`` tuple, or use :meth:`set_position`
+        Cone search — ``coordinates`` an `~astropy.coordinates.SkyCoord`,
+        ``radius`` an `~astropy.units.Quantity`, e.g. ``0.5 * u.deg``.
+    obs_publisher_did : list of str
         Exact-match publisher DIDs (``IN (...)``).
-    dataproduct_type : str, optional
-        ``None`` = no filter. ``""`` = match a blank/NULL ``dataproduct_type``.
-        Anything else = exact match, ignoring case.
-    target_name : str, optional
+    dataproduct_type : str
+        ``""`` = match a blank/NULL ``dataproduct_type``; never set = no
+        filter; anything else = exact match, ignoring case.
+    target_name : str
         Exact match, ignoring case.
-    collection : str, optional
+    collection : str
         Exact match on ``obs_collection``, ignoring case.
-    facility : str, optional
+    facility : str
         Exact match on ``facility_name``, ignoring case.
-    instrument : str, optional
+    instrument : str
         Exact match on ``instrument_name``, ignoring case.
-    namespace : str, optional
+    namespace : str
         Rucio DID namespace, matched as a prefix on ``obs_id``
         (``obs_id LIKE 'namespace:%'``) — the same convention-dependent split
         the Gateway itself relies on today, not a real Argus column. Nothing
         in the ObsCore standard requires ``obs_id`` to encode this.
-    filename : str, optional
+    filename : str
         Rucio DID filename, matched as a suffix on ``obs_id``
         (``obs_id LIKE '%:filename'``) — same caveat as *namespace*.
     """
 
-    coordinates: Optional[SkyCoord] = None
-    radius: Optional[u.Quantity] = None
-    obs_publisher_did: Optional[List[str]] = None
-    dataproduct_type: Optional[str] = None
-    target_name: Optional[str] = None
-    collection: Optional[str] = None
-    facility: Optional[str] = None
-    instrument: Optional[str] = None
-    namespace: Optional[str] = None
-    filename: Optional[str] = None
+    #: Fields settable via :meth:`add_filter`. ``"position"`` takes a
+    #: ``(coordinates, radius)`` tuple; every other one takes a plain value.
+    FIELDS = frozenset({
+        "position", "obs_publisher_did", "dataproduct_type", "target_name",
+        "collection", "facility", "instrument", "namespace", "filename",
+    })
+
+    def __init__(self) -> None:
+        self._position: Optional[Tuple[SkyCoord, u.Quantity]] = None
+        self._obs_publisher_did: Optional[List[str]] = None
+        self._values: Dict[str, str] = {}
+        self._order: Optional[Tuple[str, str]] = None
+
+    def add_filter(self, field: str, value) -> "SearchFilters":
+        """
+        Set one filter. Returns *self*, so calls chain.
+
+        Parameters
+        ----------
+        field : str
+            One of :attr:`FIELDS` — see the class docstring for what each
+            one matches.
+        value :
+            ``(coordinates, radius)`` for ``"position"``; a list of str for
+            ``"obs_publisher_did"``; a plain str for everything else.
+
+        Raises
+        ------
+        ValueError
+            If *field* isn't one of :attr:`FIELDS` — deliberately strict:
+            a builder that silently no-ops on a typo'd field name (``"colection"``
+            for ``"collection"``) would produce a query that quietly matches
+            more than intended, which is worse than failing loudly.
+        """
+        if field == "position":
+            coordinates, radius = value
+            self._position = (coordinates, radius)
+        elif field == "obs_publisher_did":
+            self._obs_publisher_did = list(value)
+        elif field in self.FIELDS:
+            self._values[field] = value
+        else:
+            raise ValueError(f"unknown filter field {field!r}; valid fields: {', '.join(sorted(self.FIELDS))}")
+        return self
+
+    def set_position(self, coordinates: SkyCoord, radius: u.Quantity) -> "SearchFilters":
+        """Convenience for ``add_filter("position", (coordinates, radius))``. Returns *self*."""
+        return self.add_filter("position", (coordinates, radius))
+
+    def set_order(self, field: str, direction: str = "ASC") -> "SearchFilters":
+        """
+        Order results by *field* instead of the default ``obs_publisher_did``.
+        Returns *self*, so this chains with :meth:`add_filter` too.
+
+        Combinable with :meth:`DataDiscoveryClass.search`'s keyset pagination:
+        confirmed live against Argus that the tie-breaking form this needs —
+        ``field > :v OR (field = :v AND obs_publisher_did > :did)`` — works,
+        even though the more compact row-value form
+        (``(field, obs_publisher_did) > (:v, :did)``) does not (rejected as
+        an ADQL syntax error). ``obs_publisher_did`` is always added as a
+        secondary sort key, so ordering stays deterministic even when *field*
+        has duplicate values across rows.
+
+        Parameters
+        ----------
+        field : str
+            Any real ``ivoa.ObsCore`` column name.
+        direction : str, optional
+            ``"ASC"`` (default) or ``"DESC"``.
+
+        Raises
+        ------
+        ValueError
+            If *field* isn't a real ``ivoa.ObsCore`` column, or *direction*
+            isn't ``"ASC"``/``"DESC"``.
+        """
+        direction = direction.upper()
+        if direction not in ("ASC", "DESC"):
+            raise ValueError(f"direction must be 'ASC' or 'DESC', got {direction!r}")
+        if field not in _OBSCORE_COLUMNS:
+            raise ValueError(f"unknown ivoa.ObsCore column {field!r} for set_order")
+        self._order = (field, direction)
+        return self
+
+    # ── Read-only views used internally by _build_where/_search_adql/search() ──
+    # (kept as properties, not a public dict, so that internal code is unchanged
+    # from the dataclass-attribute version this replaces.)
+
+    @property
+    def coordinates(self) -> Optional[SkyCoord]:
+        return self._position[0] if self._position else None
+
+    @property
+    def radius(self) -> Optional[u.Quantity]:
+        return self._position[1] if self._position else None
+
+    @property
+    def obs_publisher_did(self) -> Optional[List[str]]:
+        return self._obs_publisher_did
+
+    @property
+    def dataproduct_type(self) -> Optional[str]:
+        return self._values.get("dataproduct_type")
+
+    @property
+    def target_name(self) -> Optional[str]:
+        return self._values.get("target_name")
+
+    @property
+    def collection(self) -> Optional[str]:
+        return self._values.get("collection")
+
+    @property
+    def facility(self) -> Optional[str]:
+        return self._values.get("facility")
+
+    @property
+    def instrument(self) -> Optional[str]:
+        return self._values.get("instrument")
+
+    @property
+    def namespace(self) -> Optional[str]:
+        return self._values.get("namespace")
+
+    @property
+    def filename(self) -> Optional[str]:
+        return self._values.get("filename")
+
+    @property
+    def order(self) -> Optional[Tuple[str, str]]:
+        """``(field, direction)`` set via :meth:`set_order`, or ``None``."""
+        return self._order
 
 
 # ── Client class ──────────────────────────────────────────────────────────────
@@ -580,6 +740,21 @@ class DataDiscoveryClass:
     def _has_position(self, filters: Optional[SearchFilters]) -> bool:
         return filters is not None and filters.coordinates is not None and filters.radius is not None
 
+    def _columns_with_order(self, columns: str, filters: Optional[SearchFilters]) -> str:
+        """Make sure a custom :meth:`~SearchFilters.set_order` field is present
+        in the SELECT list — needed both to read the cursor value back out of
+        the result for ``next_after``, and so ``ORDER BY`` never silently
+        sorts by a column the caller can't see in what came back. Shared by
+        :meth:`search` and :meth:`explain` so what the latter shows always
+        matches what the former actually selects."""
+        if filters is None or filters.order is None:
+            return columns
+        field = filters.order[0]
+        existing = {c.strip() for c in columns.split(",")}
+        if field in existing:
+            return columns
+        return f"{columns}, {field}"
+
     def _search_adql(
         self,
         filters: Optional[SearchFilters],
@@ -595,17 +770,46 @@ class DataDiscoveryClass:
         — *after* is meaningless without a page boundary, so it's ignored in
         that case rather than silently building a WHERE clause nothing will
         ever page through.
+
+        A position filter drops ordering entirely (see :meth:`search`'s
+        docstring on why). Otherwise: no :meth:`SearchFilters.set_order` means
+        the existing ``ORDER BY obs_publisher_did ASC`` default, unchanged; a
+        custom order adds ``obs_publisher_did`` as a secondary sort key for
+        determinism, and — when paginating (*after* given, *top_n* not
+        ``None``) — needs the cursor's *order_value* half (see
+        :func:`_decode_cursor`) to build a tie-breaking condition, since
+        ``obs_publisher_did`` alone can no longer bound "everything after this
+        row" once the primary sort is on a different, possibly-repeated field.
         """
         where = self._build_where(filters)
-        if after and top_n is not None and not self._has_position(filters):
-            where = where + [f"obs_publisher_did > '{_esc(after)}'"]
+        has_position = self._has_position(filters)
+        order = None if filters is None else filters.order
+        paginating = top_n is not None
+
+        if has_position:
+            order_by = None
+        elif order is not None:
+            field, direction = order
+            order_by = f"{field} {direction}, obs_publisher_did ASC"
+            if after and paginating:
+                order_value, did_value = _decode_cursor(after)
+                cmp_op = ">" if direction == "ASC" else "<"
+                literal = _sql_literal(order_value)
+                where = where + [
+                    f"({field} {cmp_op} {literal} OR "
+                    f"({field} = {literal} AND obs_publisher_did > '{_esc(did_value)}'))"
+                ]
+        else:
+            order_by = "obs_publisher_did ASC"
+            if after and paginating:
+                where = where + [f"obs_publisher_did > '{_esc(after)}'"]
 
         select = f"SELECT {columns}" if top_n is None else f"SELECT TOP {top_n} {columns}"
         adql = f"{select} FROM {self.OBSCORE_TABLE}"
         if where:
             adql += " WHERE " + " AND ".join(where)
-        if not self._has_position(filters):
-            adql += " ORDER BY obs_publisher_did"
+        if order_by:
+            adql += f" ORDER BY {order_by}"
         return adql
 
     def search(
@@ -653,6 +857,12 @@ class DataDiscoveryClass:
         (MAN-827's own contract for this shortcut is literally "a page of
         rows"), not because every caller needs pagination.
 
+        A custom order (:meth:`SearchFilters.set_order`) works alongside
+        keyset pagination — see that method's docstring for exactly how; the
+        cursor in ``next_after`` becomes an opaque string carrying both the
+        order field's value and the ``obs_publisher_did`` tie-breaker, still
+        just a string to pass back in as *after*.
+
         Parameters
         ----------
         filters : SearchFilters, optional
@@ -688,13 +898,14 @@ class DataDiscoveryClass:
 
         Examples
         --------
-        >>> filters = SearchFilters(collection="JCMT", dataproduct_type="image")
+        >>> filters = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image")
         >>> page1 = DataDiscovery.search(filters, page_size=50)
         >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
         >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
         """
-        columns = columns or self.DEFAULT_SEARCH_COLUMNS
+        columns = self._columns_with_order(columns or self.DEFAULT_SEARCH_COLUMNS, filters)
         has_position = self._has_position(filters)
+        order = None if filters is None else filters.order
         unbounded = page_size is None
         # Fetch one extra row to learn whether another page exists, without a
         # second round trip or an OFFSET this service doesn't support; trimmed
@@ -721,11 +932,13 @@ class DataDiscoveryClass:
         if split_obs_id and "obs_id" in table.colnames:
             _add_namespace_filename_columns(table)
 
-        table.meta["next_after"] = (
-            str(table["obs_publisher_did"][-1])
-            if has_more and len(table) and "obs_publisher_did" in table.colnames
-            else None
-        )
+        if has_more and len(table) and "obs_publisher_did" in table.colnames:
+            if order is not None and order[0] in table.colnames:
+                table.meta["next_after"] = _encode_cursor(table[order[0]][-1], table["obs_publisher_did"][-1])
+            else:
+                table.meta["next_after"] = str(table["obs_publisher_did"][-1])
+        else:
+            table.meta["next_after"] = None
 
         if with_total_count:
             count_where = self._build_where(filters)
@@ -821,10 +1034,10 @@ class DataDiscoveryClass:
 
         Examples
         --------
-        >>> DataDiscovery.explain(SearchFilters(collection="JCMT"))
-        "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did"
+        >>> DataDiscovery.explain(SearchFilters().add_filter("collection", "JCMT"))
+        "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did ASC"
         """
-        columns = columns or self.DEFAULT_SEARCH_COLUMNS
+        columns = self._columns_with_order(columns or self.DEFAULT_SEARCH_COLUMNS, filters)
         return self._search_adql(filters, columns, after, page_size)
 
     def execute_adql(
@@ -1181,6 +1394,40 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
 def _esc(s: str) -> str:
     """Minimal ADQL string-literal escaping."""
     return s.replace("'", "''")
+
+
+def _sql_literal(value) -> str:
+    """ADQL literal for *value* -- quoted only if it's actually a string.
+    Used for the custom-order keyset tie-break in :meth:`DataDiscoveryClass._search_adql`,
+    where the column's real type (numeric vs char) has to be respected or the
+    comparison is either a syntax error or silently wrong."""
+    if isinstance(value, str):
+        return f"'{_esc(value)}'"
+    return repr(float(value))
+
+
+#: Separator for the composite (order_value, obs_publisher_did) cursor a
+#: custom-ordered search() page needs -- U+001F (unit separator), chosen
+#: because it can't appear in a DID or a real column value typed at a keyboard.
+_CURSOR_SEP = "\x1f"
+
+
+def _encode_cursor(order_value, did_value) -> str:
+    """Opaque keyset cursor carrying both a custom order field's last value
+    and the obs_publisher_did tie-breaker -- needed once :meth:`SearchFilters.set_order`
+    is in play, since obs_publisher_did alone no longer determines row order.
+    The plain (no custom order) case still uses a bare obs_publisher_did
+    string as its cursor, unchanged -- this encoding is only used when there's
+    a second value to carry."""
+    tag = "s" if isinstance(order_value, str) else "n"
+    return f"{tag}{_CURSOR_SEP}{order_value}{_CURSOR_SEP}{did_value}"
+
+
+def _decode_cursor(cursor: str) -> Tuple[object, str]:
+    """Inverse of :func:`_encode_cursor` -- returns ``(order_value, did_value)``."""
+    tag, order_repr, did_value = cursor.split(_CURSOR_SEP, 2)
+    order_value = order_repr if tag == "s" else float(order_repr)
+    return order_value, did_value
 
 
 def _add_namespace_filename_columns(table: Table) -> None:
