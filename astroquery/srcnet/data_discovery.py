@@ -174,6 +174,25 @@ class SearchFilters:
     methods; it does not change ``query_observations``/``query_name`` or their
     existing callers.
 
+    ``UPPER(col)`` *can* cost more than a plain ``col = 'value'`` comparison on
+    a TAP service backed by a real database, since it prevents the query
+    planner from using a plain index on *col* (production Argus currently
+    holds zero rows, so this never shows up there). Tested against a populated
+    Argus deployment (CADC's ``ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus``),
+    paired timing runs gave contradictory results in both directions (single
+    query pairs ranged from the ``UPPER()`` form being ~5x slower to it being
+    faster) — response-time variance on that shared, third-party service
+    turned out to be larger than whatever effect ``UPPER()`` has on its own,
+    so treat this as an untested-but-plausible optimization for a given
+    deployment, not a guaranteed speedup. Pass ``case_sensitive=True`` to
+    :meth:`add_filter` on ``dataproduct_type``, ``target_name``,
+    ``collection``, ``facility`` or ``instrument`` (the only fields
+    ``UPPER()``-wrapped by default) to opt out and get a plain
+    ``col = 'value'`` comparison instead, when you know the value in your data
+    is consistently cased (e.g. collection codes like ``"HST"``/``"JCMT"``
+    usually are) and want to rule ``UPPER()`` out as a cost on your own
+    deployment.
+
     Filter fields (each set via ``add_filter(field, value)``)
     ------------------------------------------------------------
     position : ``(coordinates, radius)`` tuple, or use :meth:`set_position`
@@ -209,13 +228,23 @@ class SearchFilters:
         "collection", "facility", "instrument", "namespace", "filename",
     })
 
+    #: The only fields ``UPPER()``-wrapped by default (i.e. the only ones
+    #: ``case_sensitive`` on :meth:`add_filter` has any effect on).
+    #: ``obs_publisher_did`` (``IN (...)``) and ``namespace``/``filename``
+    #: (``LIKE``, no ``UPPER()``) are already case-sensitive; ``position``
+    #: isn't a string comparison at all.
+    CASE_INSENSITIVE_FIELDS = frozenset({
+        "dataproduct_type", "target_name", "collection", "facility", "instrument",
+    })
+
     def __init__(self) -> None:
         self._position: Optional[Tuple[SkyCoord, u.Quantity]] = None
         self._obs_publisher_did: Optional[List[str]] = None
         self._values: Dict[str, str] = {}
+        self._case_sensitive: Dict[str, bool] = {}
         self._order: Optional[Tuple[str, str]] = None
 
-    def add_filter(self, field: str, value) -> "SearchFilters":
+    def add_filter(self, field: str, value, *, case_sensitive: bool = False) -> "SearchFilters":
         """
         Set one filter. Returns *self*, so calls chain.
 
@@ -227,6 +256,16 @@ class SearchFilters:
         value :
             ``(coordinates, radius)`` for ``"position"``; a list of str for
             ``"obs_publisher_did"``; a plain str for everything else.
+        case_sensitive : bool, optional
+            Only meaningful for :attr:`CASE_INSENSITIVE_FIELDS` (``dataproduct_type``,
+            ``target_name``, ``collection``, ``facility``, ``instrument``), which
+            default to a case-insensitive ``UPPER(col) = UPPER('value')`` match.
+            Pass ``True`` to get a plain ``col = 'value'`` comparison instead,
+            which may be faster on a TAP service backed by a real database
+            (``UPPER(col)`` can prevent using a plain index on *col* — see the
+            class docstring for what live testing against a populated Argus
+            deployment did and didn't confirm about this), at the cost of no
+            longer matching a differently-cased value.
 
         Raises
         ------
@@ -234,8 +273,16 @@ class SearchFilters:
             If *field* isn't one of :attr:`FIELDS` — deliberately strict:
             a builder that silently no-ops on a typo'd field name (``"colection"``
             for ``"collection"``) would produce a query that quietly matches
-            more than intended, which is worse than failing loudly.
+            more than intended, which is worse than failing loudly. Also raised
+            if ``case_sensitive`` is passed for a field it has no effect on —
+            it's not a filter in its own right, so silently accepting it there
+            would misleadingly suggest it did something.
         """
+        if case_sensitive and field not in self.CASE_INSENSITIVE_FIELDS:
+            raise ValueError(
+                f"case_sensitive only applies to {', '.join(sorted(self.CASE_INSENSITIVE_FIELDS))}; "
+                f"{field!r} has no case-insensitive default to opt out of"
+            )
         if field == "position":
             coordinates, radius = value
             self._position = (coordinates, radius)
@@ -243,9 +290,17 @@ class SearchFilters:
             self._obs_publisher_did = list(value)
         elif field in self.FIELDS:
             self._values[field] = value
+            if field in self.CASE_INSENSITIVE_FIELDS:
+                self._case_sensitive[field] = case_sensitive
         else:
             raise ValueError(f"unknown filter field {field!r}; valid fields: {', '.join(sorted(self.FIELDS))}")
         return self
+
+    def is_case_sensitive(self, field: str) -> bool:
+        """Whether *field* was last set with ``case_sensitive=True``. Only
+        meaningful for :attr:`CASE_INSENSITIVE_FIELDS`; ``False`` for anything
+        else (including a field that was never set)."""
+        return self._case_sensitive.get(field, False)
 
     def set_position(self, coordinates: SkyCoord, radius: u.Quantity) -> "SearchFilters":
         """Convenience for ``add_filter("position", (coordinates, radius))``. Returns *self*."""
@@ -720,16 +775,27 @@ class DataDiscoveryClass:
             if filters.dataproduct_type == "":
                 where.append("(dataproduct_type IS NULL OR dataproduct_type = '')")
             else:
-                where.append(f"UPPER(dataproduct_type) = UPPER('{_esc(filters.dataproduct_type)}')")
+                where.append(_exact_match_where(
+                    "dataproduct_type", filters.dataproduct_type,
+                    filters.is_case_sensitive("dataproduct_type"),
+                ))
 
         if filters.target_name:
-            where.append(f"UPPER(target_name) = UPPER('{_esc(filters.target_name)}')")
+            where.append(_exact_match_where(
+                "target_name", filters.target_name, filters.is_case_sensitive("target_name"),
+            ))
         if filters.collection:
-            where.append(f"UPPER(obs_collection) = UPPER('{_esc(filters.collection)}')")
+            where.append(_exact_match_where(
+                "obs_collection", filters.collection, filters.is_case_sensitive("collection"),
+            ))
         if filters.facility:
-            where.append(f"UPPER(facility_name) = UPPER('{_esc(filters.facility)}')")
+            where.append(_exact_match_where(
+                "facility_name", filters.facility, filters.is_case_sensitive("facility"),
+            ))
         if filters.instrument:
-            where.append(f"UPPER(instrument_name) = UPPER('{_esc(filters.instrument)}')")
+            where.append(_exact_match_where(
+                "instrument_name", filters.instrument, filters.is_case_sensitive("instrument"),
+            ))
         if filters.namespace:
             where.append(f"obs_id LIKE '{_esc(filters.namespace)}:%'")
         if filters.filename:
@@ -1394,6 +1460,17 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
 def _esc(s: str) -> str:
     """Minimal ADQL string-literal escaping."""
     return s.replace("'", "''")
+
+
+def _exact_match_where(column: str, value: str, case_sensitive: bool) -> str:
+    """``column = 'value'`` (case-sensitive) or ``UPPER(column) = UPPER('value')``
+    (default) — the latter can cost more against a TAP service backed by a
+    real database, since ``UPPER(col)`` can't use a plain index on *col*, but
+    see :class:`SearchFilters` for what live testing did and didn't confirm
+    about this."""
+    if case_sensitive:
+        return f"{column} = '{_esc(value)}'"
+    return f"UPPER({column}) = UPPER('{_esc(value)}')"
 
 
 def _sql_literal(value) -> str:
