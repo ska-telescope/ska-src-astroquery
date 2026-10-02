@@ -118,10 +118,13 @@ class DataAccessClass:
     @handle_exceptions
     @exchange_token_for_service("data-management-api")
     @refresh_token_if_expired
-    def get_data(self, namespace, name, sort="nearest_by_ip", ip_address=None):
+    def get_data(self, namespace, name, sort="random", ip_address=None,
+                 output_file=None):
         """Locate and download a data product by its identifier.
 
-        The file is written to the current working directory under *name*.
+        By default the file is written to the current working directory under
+        the last path component of *name* (a name such as
+        ``"eb_001/prod_001/PTF10tce.fits"`` is saved as ``PTF10tce.fits``).
         Progress is printed to stdout.
 
         Parameters
@@ -129,30 +132,47 @@ class DataAccessClass:
         namespace : str
             Data identifier namespace, e.g. ``"testing"``.
         name : str
-            Data identifier name, e.g. ``"PTF10tce.fits"``.
+            Data identifier name, e.g. ``"PTF10tce.fits"``.  May contain
+            ``/``.
         sort : str
-            Replica selection strategy: ``"nearest_by_ip"`` (default) or
-            ``"random"``.
+            Replica selection strategy: ``"random"`` (default, same as the
+            Data Management API) or ``"nearest_by_ip"``.  ``"nearest_by_ip"``
+            needs a GeoIP database on the server; if the server fails to
+            sort by location (any 5xx), the request is retried with
+            ``"random"`` and a warning is logged.
         ip_address : str, optional
             Client IP address used by the ``"nearest_by_ip"`` strategy.
             Defaults to the requesting client IP.
+        output_file : str, optional
+            Local path to write to.  Parent directories are created if
+            needed.  Defaults to ``os.path.basename(name)``.
+
+        Returns
+        -------
+        str
+            The local path the file was written to.
 
         Examples
         --------
         >>> da = SRCNet.get_data_access()
         >>> da.get_data("testing", "PTF10tce.fits")
+        'PTF10tce.fits'
         """
-        locate_endpoint = (
-            "{api}/data/locate/{ns}/{name}"
-            "?sort={sort}&ip_address={ip}".format(
-                api=self.srcnet_dm_api_base_address,
-                ns=namespace,
-                name=name,
-                sort=sort,
-                ip=ip_address if ip_address else "",
-            )
+        locate_endpoint = "{api}/data/locate/{ns}/{name}".format(
+            api=self.srcnet_dm_api_base_address,
+            ns=namespace,
+            name=name,
         )
-        resp = self.session.get(locate_endpoint)
+        params = {"sort": sort}
+        if ip_address:
+            params["ip_address"] = ip_address
+        resp = self.session.get(locate_endpoint, params=params)
+        if sort == "nearest_by_ip" and resp.status_code >= 500:
+            log.warning(
+                "Locating the nearest replica failed (HTTP {status}); "
+                "retrying with sort='random'.".format(status=resp.status_code)
+            )
+            resp = self.session.get(locate_endpoint, params={"sort": "random"})
         resp.raise_for_status()
         location_response = resp.json()
 
@@ -185,15 +205,20 @@ class DataAccessClass:
             stream=True,
         )
         resp.raise_for_status()
-        with open(name, "wb") as f:
+        if output_file is None:
+            output_file = os.path.basename(name)
+        if os.path.dirname(output_file):
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024):
                 print(
-                    "{}KB downloaded".format(round(os.path.getsize(name) / 1024), ),
+                    "{}KB downloaded".format(round(os.path.getsize(output_file) / 1024), ),
                     end="\r",
                 )
                 f.write(chunk)
                 f.flush()
         print("\n")
+        return output_file
 
     @handle_exceptions
     @exchange_token_for_service("data-management-api")
