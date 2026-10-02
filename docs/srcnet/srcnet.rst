@@ -236,18 +236,20 @@ registered for the file.
 get_data
 ^^^^^^^^
 
-Download a data product.  By default it is written to the current working
-directory under the last path component of the name, and the local path is
-returned.
+Download a data product.  By default it is written under the current working
+directory at the relative path given by the name (directories are created), and
+the local path is returned.  Names that are absolute or contain ``..`` are
+rejected unless ``output_file`` is given.
 
 .. code-block:: python
 
     >>> da.get_data("testing", "PTF10tce.fits")
     'PTF10tce.fits'
 
-    >>> # A name containing '/' is saved under its basename...
+    >>> # A name containing '/' keeps its directories, so products sharing a
+    >>> # final filename don't overwrite each other...
     >>> da.get_data("srcnet_test.comm", "test_eb_001.test_prod_001/PTF10tce.fits")
-    'PTF10tce.fits'
+    'test_eb_001.test_prod_001/PTF10tce.fits'
 
     >>> # ...or wherever output_file says (parent directories are created)
     >>> da.get_data("testing", "PTF10tce.fits", output_file="downloads/ptf.fits")

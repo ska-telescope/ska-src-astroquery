@@ -122,10 +122,11 @@ class DataAccessClass:
                  output_file=None):
         """Locate and download a data product by its identifier.
 
-        By default the file is written to the current working directory under
-        the last path component of *name* (a name such as
-        ``"eb_001/prod_001/PTF10tce.fits"`` is saved as ``PTF10tce.fits``).
-        Progress is printed to stdout.
+        By default the file is written under the current working directory at
+        the relative path given by *name*, creating any directories it names
+        (``"eb_001/PTF10tce.fits"`` is saved as ``./eb_001/PTF10tce.fits``),
+        so products whose names share a final component do not overwrite each
+        other.  Progress is printed to stdout.
 
         Parameters
         ----------
@@ -133,7 +134,9 @@ class DataAccessClass:
             Data identifier namespace, e.g. ``"testing"``.
         name : str
             Data identifier name, e.g. ``"PTF10tce.fits"``.  May contain
-            ``/``.
+            ``/``.  Without *output_file*, a name that is absolute or contains
+            ``..`` is rejected rather than written outside the working
+            directory.
         sort : str
             Replica selection strategy: ``"random"`` (default, same as the
             Data Management API) or ``"nearest_by_ip"``.  ``"nearest_by_ip"``
@@ -145,7 +148,7 @@ class DataAccessClass:
             Defaults to the requesting client IP.
         output_file : str, optional
             Local path to write to.  Parent directories are created if
-            needed.  Defaults to ``os.path.basename(name)``.
+            needed.  Defaults to *name*, relative to the working directory.
 
         Returns
         -------
@@ -158,6 +161,13 @@ class DataAccessClass:
         >>> da.get_data("testing", "PTF10tce.fits")
         'PTF10tce.fits'
         """
+        if output_file is None:
+            output_file = os.path.normpath(name)
+            if os.path.isabs(output_file) or output_file.split(os.sep)[0] == os.pardir:
+                raise ValueError(
+                    "Refusing to write {name!r} outside the working directory; "
+                    "pass output_file= to choose a path.".format(name=name)
+                )
         locate_endpoint = "{api}/data/locate/{ns}/{name}".format(
             api=self.srcnet_dm_api_base_address,
             ns=namespace,
@@ -208,8 +218,6 @@ class DataAccessClass:
             stream=True,
         )
         resp.raise_for_status()
-        if output_file is None:
-            output_file = os.path.basename(name)
         if os.path.dirname(output_file):
             os.makedirs(os.path.dirname(output_file), exist_ok=True)
         with open(output_file, "wb") as f:

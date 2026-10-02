@@ -47,13 +47,41 @@ def test_get_data_defaults_to_random_and_omits_ip(da, tmp_path, monkeypatch):
     assert locate_call.kwargs["params"] == {"sort": "random"}
 
 
-def test_get_data_writes_basename_of_a_name_with_slashes(da, tmp_path, monkeypatch):
+def test_get_data_keeps_the_directories_of_a_name_with_slashes(da, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     path = _get_data(da, [_response(json_data=LOCATION),
                           _response(json_data={"access_token": "storage-token"})])
 
-    assert path == "PTF10tce.fits"
-    assert (tmp_path / "PTF10tce.fits").read_bytes() == b"abcdef"
+    assert path == os.path.join("eb_001.prod_001", "PTF10tce.fits")
+    assert (tmp_path / "eb_001.prod_001" / "PTF10tce.fits").read_bytes() == b"abcdef"
+
+
+def test_get_data_names_sharing_a_filename_do_not_overwrite(da, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for eb, content in (("eb_001", b"first"), ("eb_002", b"second")):
+        da.session.get.side_effect = [_response(json_data=LOCATION),
+                                      _response(json_data={"access_token": "storage-token"})]
+        with patch("requests.get", return_value=_response(chunks=[content])):
+            da.get_data("ns", eb + "/image.fits")
+
+    assert (tmp_path / "eb_001" / "image.fits").read_bytes() == b"first"
+    assert (tmp_path / "eb_002" / "image.fits").read_bytes() == b"second"
+
+
+@pytest.mark.parametrize("name", ["../escape.fits", "a/../../escape.fits", "/abs/escape.fits"])
+def test_get_data_refuses_a_name_outside_the_working_directory(da, tmp_path, monkeypatch, name):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(Exception, match="outside the working directory"):
+        da.get_data("ns", name)
+    da.session.get.assert_not_called()
+
+
+def test_get_data_output_file_allows_any_name(da, tmp_path):
+    target = os.path.join(tmp_path, "out.fits")
+    da.session.get.side_effect = [_response(json_data=LOCATION),
+                                  _response(json_data={"access_token": "storage-token"})]
+    with patch("requests.get", return_value=_response(chunks=[b"x"])):
+        assert da.get_data("ns", "../escape.fits", output_file=target) == target
 
 
 def test_get_data_output_file_creates_parent_directories(da, tmp_path):
