@@ -90,3 +90,15 @@ def test_get_data_does_not_retry_a_client_error(da, tmp_path, monkeypatch):
     with pytest.raises(Exception, match="404"):
         da.get_data("srcnet_test.comm", "eb_001.prod_001/PTF10tce.fits", sort="nearest_by_ip")
     assert da.session.get.call_count == 1
+
+
+def test_get_data_fetches_a_davs_replica_over_https(da, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    location = [dict(LOCATION[0], replicas=["davs://storage.example:1094/area/PTF10tce.fits"])]
+    da.session.get.side_effect = [_response(json_data=location),
+                                  _response(json_data={"access_token": "storage-token"})]
+    with patch("requests.get", return_value=_response(chunks=[b"abc"])) as storage_get:
+        da.get_data("srcnet_test.comm", "eb_001.prod_001/PTF10tce.fits")
+
+    assert storage_get.call_args.args == ("https://storage.example:1094/area/PTF10tce.fits",)
+    assert storage_get.call_args.kwargs["headers"] == {"Authorization": "Bearer storage-token"}

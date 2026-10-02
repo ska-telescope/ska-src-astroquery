@@ -186,6 +186,9 @@ class DataAccessClass:
         log.info("Downloading data from {rse} ({url})".format(rse=rse, url=access_url))
         if not (access_url.startswith("https") or access_url.startswith("davs")):
             raise UnsupportedAccessProtocol(access_url.split(":")[0])
+        # davs:// is WebDAV over TLS, which requests only fetches as https://
+        if access_url.startswith("davs://"):
+            access_url = "https://" + access_url[len("davs://"):]
 
         token_endpoint = (
             "{api}/data/download/{storage_id}/{ns}/{name}".format(
