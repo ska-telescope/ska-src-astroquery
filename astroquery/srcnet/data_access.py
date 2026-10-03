@@ -37,6 +37,33 @@ from astroquery.srcnet.core import (
 __all__ = ["DataAccess", "DataAccessClass"]
 
 
+def _default_output_path(name):
+    """Map a data identifier name to a path under the working directory.
+
+    The name's ``/``-separated parts become directories, without any
+    normalisation, so distinct names always give distinct paths.  Refuses a
+    name with an empty, ``.`` or ``..`` part (or a part containing a path
+    separator), and a path that resolves outside the working directory, e.g.
+    through an existing symlink.
+    """
+    parts = name.split("/")
+    separators = [sep for sep in (os.sep, os.altsep) if sep]
+    if any(part in ("", os.curdir, os.pardir) or any(sep in part for sep in separators)
+           for part in parts):
+        raise ValueError(
+            "Cannot derive a local path from {name!r} (empty, '.' or '..' part); "
+            "pass output_file= to choose a path.".format(name=name)
+        )
+    path = os.path.join(*parts)
+    base = os.path.realpath(os.getcwd())
+    if os.path.commonpath([base, os.path.realpath(path)]) != base:
+        raise ValueError(
+            "Refusing to write {name!r} outside the working directory (it resolves "
+            "through a symlink); pass output_file= to choose a path.".format(name=name)
+        )
+    return path
+
+
 class DataAccessClass:
     """Client for SRCNet data product access.
 
@@ -134,9 +161,9 @@ class DataAccessClass:
             Data identifier namespace, e.g. ``"testing"``.
         name : str
             Data identifier name, e.g. ``"PTF10tce.fits"``.  May contain
-            ``/``.  Without *output_file*, a name that is absolute or contains
-            ``..`` is rejected rather than written outside the working
-            directory.
+            ``/``.  Without *output_file*, a name with an empty, ``.`` or
+            ``..`` part, or one that would resolve outside the working
+            directory (e.g. through a symlink), is rejected before any request.
         sort : str
             Replica selection strategy: ``"random"`` (default, same as the
             Data Management API) or ``"nearest_by_ip"``.  ``"nearest_by_ip"``
@@ -162,12 +189,7 @@ class DataAccessClass:
         'PTF10tce.fits'
         """
         if output_file is None:
-            output_file = os.path.normpath(name)
-            if os.path.isabs(output_file) or output_file.split(os.sep)[0] == os.pardir:
-                raise ValueError(
-                    "Refusing to write {name!r} outside the working directory; "
-                    "pass output_file= to choose a path.".format(name=name)
-                )
+            output_file = _default_output_path(name)
         locate_endpoint = "{api}/data/locate/{ns}/{name}".format(
             api=self.srcnet_dm_api_base_address,
             ns=namespace,

@@ -238,8 +238,9 @@ get_data
 
 Download a data product.  By default it is written under the current working
 directory at the relative path given by the name (directories are created), and
-the local path is returned.  Names that are absolute or contain ``..`` are
-rejected unless ``output_file`` is given.
+the local path is returned.  A name with an empty, ``.`` or ``..`` part, or
+one that would resolve outside the working directory (e.g. through a symlink),
+is rejected unless ``output_file`` is given.
 
 .. code-block:: python
 

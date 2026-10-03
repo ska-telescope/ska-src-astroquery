@@ -68,12 +68,46 @@ def test_get_data_names_sharing_a_filename_do_not_overwrite(da, tmp_path, monkey
     assert (tmp_path / "eb_002" / "image.fits").read_bytes() == b"second"
 
 
-@pytest.mark.parametrize("name", ["../escape.fits", "a/../../escape.fits", "/abs/escape.fits"])
-def test_get_data_refuses_a_name_outside_the_working_directory(da, tmp_path, monkeypatch, name):
+@pytest.mark.parametrize("name", [
+    "../escape.fits",
+    "a/../../escape.fits",
+    "/abs/escape.fits",
+    # Normalising these would alias another identifier's path.
+    "eb_001/sub/../image.fits",
+    "eb_001/./image.fits",
+    "eb_001//image.fits",
+    "eb_001/",
+])
+def test_get_data_refuses_a_name_with_an_empty_dot_or_dotdot_part(da, tmp_path, monkeypatch, name):
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(Exception, match="outside the working directory"):
+    with pytest.raises(Exception, match="Cannot derive a local path"):
         da.get_data("ns", name)
     da.session.get.assert_not_called()
+
+
+def test_get_data_refuses_a_path_through_a_symlink_outside(da, tmp_path, monkeypatch):
+    workdir, outside = tmp_path / "work", tmp_path / "outside"
+    workdir.mkdir()
+    outside.mkdir()
+    (workdir / "eb_001").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(workdir)
+
+    with pytest.raises(Exception, match="outside the working directory"):
+        da.get_data("ns", "eb_001/image.fits")
+    da.session.get.assert_not_called()
+    assert not (outside / "image.fits").exists()
+
+
+def test_get_data_allows_a_symlink_that_stays_inside(da, tmp_path, monkeypatch):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "eb_001").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    da.session.get.side_effect = [_response(json_data=LOCATION),
+                                  _response(json_data={"access_token": "storage-token"})]
+    with patch("requests.get", return_value=_response(chunks=[b"x"])):
+        da.get_data("ns", "eb_001/image.fits")
+
+    assert (tmp_path / "real" / "image.fits").read_bytes() == b"x"
 
 
 def test_get_data_output_file_allows_any_name(da, tmp_path):
