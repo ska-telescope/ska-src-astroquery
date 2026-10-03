@@ -222,16 +222,21 @@ get_metadata
 ^^^^^^^^^^^^
 
 Retrieve the JSON metadata record for a data product stored in the SRCNet
-Data Management API.
+Data Management API.  ``plugin`` selects which metadata is returned:
+
+- ``"POSTGRES_JSON"`` (default) — custom metadata registered for the product.
+  A product with none gives a 404 ("No metadata found").
+- ``"DID_COLUMN"`` — Rucio's own fields for the identifier, such as ``bytes``,
+  ``adler32``, ``md5`` and ``did_type``.
 
 .. code-block:: python
 
-    >>> meta = da.get_metadata("testing", "PTF10tce.fits")
-    >>> print(meta["size"], meta["checksum"])
+    >>> # Size and checksum
+    >>> meta = da.get_metadata("testing", "PTF10tce.fits", plugin="DID_COLUMN")
+    >>> print(meta["bytes"], meta["adler32"])
 
-The returned dictionary contains at minimum ``size`` (bytes), ``checksum``,
-and ``replicas`` (list of storage locations), plus any custom attributes
-registered for the file.
+    >>> # Custom attributes registered for the file
+    >>> custom = da.get_metadata("testing", "PTF10tce.fits")
 
 get_data
 ^^^^^^^^

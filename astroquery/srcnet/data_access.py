@@ -36,6 +36,9 @@ from astroquery.srcnet.core import (
 
 __all__ = ["DataAccess", "DataAccessClass"]
 
+#: Metadata plugins the Data Management API accepts for ``get_metadata``.
+METADATA_PLUGINS = ("POSTGRES_JSON", "DID_COLUMN")
+
 
 class DataAccessClass:
     """Client for SRCNet data product access.
@@ -198,7 +201,7 @@ class DataAccessClass:
     @handle_exceptions
     @exchange_token_for_service("data-management-api")
     @refresh_token_if_expired
-    def get_metadata(self, namespace, name):
+    def get_metadata(self, namespace, name, plugin="POSTGRES_JSON"):
         """Retrieve JSON metadata for a data product.
 
         Parameters
@@ -207,22 +210,41 @@ class DataAccessClass:
             Data identifier namespace, e.g. ``"testing"``.
         name : str
             Data identifier name, e.g. ``"PTF10tce.fits"``.
+        plugin : str
+            Which Rucio metadata to return:
+
+            - ``"POSTGRES_JSON"`` (default) -- custom metadata registered for
+              the product.  A product with none gives a 404 ("No metadata
+              found").
+            - ``"DID_COLUMN"`` -- Rucio's own fields for the identifier, such
+              as ``bytes``, ``adler32``, ``md5`` and ``did_type``.
 
         Returns
         -------
         dict
             Metadata as returned by the Data Management API.
 
+        Raises
+        ------
+        ValueError
+            If *plugin* is not one of the values above.  (The API would
+            otherwise silently fall back to ``"POSTGRES_JSON"``.)
+
         Examples
         --------
         >>> da = SRCNet.get_data_access()
-        >>> meta = da.get_metadata("testing", "PTF10tce.fits")
-        >>> print(meta["size"])
+        >>> meta = da.get_metadata("testing", "PTF10tce.fits", plugin="DID_COLUMN")
+        >>> print(meta["bytes"], meta["adler32"])
         """
-        url = "{api}/metadata/{ns}/{name}?plugin=POSTGRES_JSON".format(
+        if plugin not in METADATA_PLUGINS:
+            raise ValueError(
+                "plugin must be one of {plugins}, not {plugin!r}".format(
+                    plugins=", ".join(METADATA_PLUGINS), plugin=plugin)
+            )
+        url = "{api}/metadata/{ns}/{name}".format(
             api=self.srcnet_dm_api_base_address, ns=namespace, name=name
         )
-        resp = self.session.get(url)
+        resp = self.session.get(url, params={"plugin": plugin})
         resp.raise_for_status()
         return resp.json()
 

@@ -336,9 +336,9 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         """
         return self._data_access
 
-    def get_metadata(self, namespace, name):
+    def get_metadata(self, namespace, name, plugin="POSTGRES_JSON"):
         """Convenience proxy — delegates to :meth:`~DataAccessClass.get_metadata`."""
-        return self._data_access.get_metadata(namespace, name)
+        return self._data_access.get_metadata(namespace, name, plugin=plugin)
 
     def soda_cutout(self, namespace, name, output_file=None, **kwargs):
         """Convenience proxy — delegates to :meth:`~DataAccessClass.soda_cutout`."""
