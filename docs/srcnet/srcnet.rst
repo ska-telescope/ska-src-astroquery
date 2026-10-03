@@ -236,20 +236,33 @@ registered for the file.
 get_data
 ^^^^^^^^
 
-Download a data product to the current working directory.  The nearest
-replica is selected automatically by default.
+Download a data product.  By default it is written under the current working
+directory at the relative path given by the name (directories are created), and
+the local path is returned.  A name with an empty, ``.`` or ``..`` part, or
+one that would resolve outside the working directory (e.g. through a symlink),
+is rejected unless ``output_file`` is given.
 
 .. code-block:: python
 
     >>> da.get_data("testing", "PTF10tce.fits")
+    'PTF10tce.fits'
 
-    >>> # Explicitly select a random replica
-    >>> da.get_data("testing", "PTF10tce.fits", sort="random")
+    >>> # A name containing '/' keeps its directories, so products sharing a
+    >>> # final filename don't overwrite each other...
+    >>> da.get_data("srcnet_test.comm", "test_eb_001.test_prod_001/PTF10tce.fits")
+    'test_eb_001.test_prod_001/PTF10tce.fits'
+
+    >>> # ...or wherever output_file says (parent directories are created)
+    >>> da.get_data("testing", "PTF10tce.fits", output_file="downloads/ptf.fits")
+    'downloads/ptf.fits'
 
 ``sort`` controls replica selection:
 
-- ``"nearest_by_ip"`` (default) — geographically closest SRC site
-- ``"random"`` — random replica
+- ``"random"`` (default, same as the Data Management API) — random replica
+- ``"nearest_by_ip"`` — geographically closest SRC site.  This needs a GeoIP
+  database on the Data Management API server; if the server fails to sort by
+  location (any 5xx), the request is retried with ``"random"`` and a warning
+  is logged.
 
 soda_cutout
 ^^^^^^^^^^^

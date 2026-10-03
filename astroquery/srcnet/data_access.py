@@ -37,6 +37,33 @@ from astroquery.srcnet.core import (
 __all__ = ["DataAccess", "DataAccessClass"]
 
 
+def _default_output_path(name):
+    """Map a data identifier name to a path under the working directory.
+
+    The name's ``/``-separated parts become directories, without any
+    normalisation, so distinct names always give distinct paths.  Refuses a
+    name with an empty, ``.`` or ``..`` part (or a part containing a path
+    separator), and a path that resolves outside the working directory, e.g.
+    through an existing symlink.
+    """
+    parts = name.split("/")
+    separators = [sep for sep in (os.sep, os.altsep) if sep]
+    if any(part in ("", os.curdir, os.pardir) or any(sep in part for sep in separators)
+           for part in parts):
+        raise ValueError(
+            "Cannot derive a local path from {name!r} (empty, '.' or '..' part); "
+            "pass output_file= to choose a path.".format(name=name)
+        )
+    path = os.path.join(*parts)
+    base = os.path.realpath(os.getcwd())
+    if os.path.commonpath([base, os.path.realpath(path)]) != base:
+        raise ValueError(
+            "Refusing to write {name!r} outside the working directory (it resolves "
+            "through a symlink); pass output_file= to choose a path.".format(name=name)
+        )
+    return path
+
+
 class DataAccessClass:
     """Client for SRCNet data product access.
 
@@ -118,41 +145,66 @@ class DataAccessClass:
     @handle_exceptions
     @exchange_token_for_service("data-management-api")
     @refresh_token_if_expired
-    def get_data(self, namespace, name, sort="nearest_by_ip", ip_address=None):
+    def get_data(self, namespace, name, sort="random", ip_address=None,
+                 output_file=None):
         """Locate and download a data product by its identifier.
 
-        The file is written to the current working directory under *name*.
-        Progress is printed to stdout.
+        By default the file is written under the current working directory at
+        the relative path given by *name*, creating any directories it names
+        (``"eb_001/PTF10tce.fits"`` is saved as ``./eb_001/PTF10tce.fits``),
+        so products whose names share a final component do not overwrite each
+        other.  Progress is printed to stdout.
 
         Parameters
         ----------
         namespace : str
             Data identifier namespace, e.g. ``"testing"``.
         name : str
-            Data identifier name, e.g. ``"PTF10tce.fits"``.
+            Data identifier name, e.g. ``"PTF10tce.fits"``.  May contain
+            ``/``.  Without *output_file*, a name with an empty, ``.`` or
+            ``..`` part, or one that would resolve outside the working
+            directory (e.g. through a symlink), is rejected before any request.
         sort : str
-            Replica selection strategy: ``"nearest_by_ip"`` (default) or
-            ``"random"``.
+            Replica selection strategy: ``"random"`` (default, same as the
+            Data Management API) or ``"nearest_by_ip"``.  ``"nearest_by_ip"``
+            needs a GeoIP database on the server; if the server fails to
+            sort by location (any 5xx), the request is retried with
+            ``"random"`` and a warning is logged.
         ip_address : str, optional
             Client IP address used by the ``"nearest_by_ip"`` strategy.
             Defaults to the requesting client IP.
+        output_file : str, optional
+            Local path to write to.  Parent directories are created if
+            needed.  Defaults to *name*, relative to the working directory.
+
+        Returns
+        -------
+        str
+            The local path the file was written to.
 
         Examples
         --------
         >>> da = SRCNet.get_data_access()
         >>> da.get_data("testing", "PTF10tce.fits")
+        'PTF10tce.fits'
         """
-        locate_endpoint = (
-            "{api}/data/locate/{ns}/{name}"
-            "?sort={sort}&ip_address={ip}".format(
-                api=self.srcnet_dm_api_base_address,
-                ns=namespace,
-                name=name,
-                sort=sort,
-                ip=ip_address if ip_address else "",
-            )
+        if output_file is None:
+            output_file = _default_output_path(name)
+        locate_endpoint = "{api}/data/locate/{ns}/{name}".format(
+            api=self.srcnet_dm_api_base_address,
+            ns=namespace,
+            name=name,
         )
-        resp = self.session.get(locate_endpoint)
+        params = {"sort": sort}
+        if ip_address:
+            params["ip_address"] = ip_address
+        resp = self.session.get(locate_endpoint, params=params)
+        if sort == "nearest_by_ip" and resp.status_code >= 500:
+            log.warning(
+                "Locating the nearest replica failed (HTTP {status}); "
+                "retrying with sort='random'.".format(status=resp.status_code)
+            )
+            resp = self.session.get(locate_endpoint, params={"sort": "random"})
         resp.raise_for_status()
         location_response = resp.json()
 
@@ -166,6 +218,9 @@ class DataAccessClass:
         log.info("Downloading data from {rse} ({url})".format(rse=rse, url=access_url))
         if not (access_url.startswith("https") or access_url.startswith("davs")):
             raise UnsupportedAccessProtocol(access_url.split(":")[0])
+        # davs:// is WebDAV over TLS, which requests only fetches as https://
+        if access_url.startswith("davs://"):
+            access_url = "https://" + access_url[len("davs://"):]
 
         token_endpoint = (
             "{api}/data/download/{storage_id}/{ns}/{name}".format(
@@ -185,15 +240,18 @@ class DataAccessClass:
             stream=True,
         )
         resp.raise_for_status()
-        with open(name, "wb") as f:
+        if os.path.dirname(output_file):
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024):
                 print(
-                    "{}KB downloaded".format(round(os.path.getsize(name) / 1024), ),
+                    "{}KB downloaded".format(round(os.path.getsize(output_file) / 1024), ),
                     end="\r",
                 )
                 f.write(chunk)
                 f.flush()
         print("\n")
+        return output_file
 
     @handle_exceptions
     @exchange_token_for_service("data-management-api")
