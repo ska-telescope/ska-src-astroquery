@@ -198,9 +198,6 @@ class DataAccessClass:
                 f.flush()
         print("\n")
 
-    @handle_exceptions
-    @exchange_token_for_service("data-management-api")
-    @refresh_token_if_expired
     def get_metadata(self, namespace, name, plugin="POSTGRES_JSON"):
         """Retrieve JSON metadata for a data product.
 
@@ -236,11 +233,19 @@ class DataAccessClass:
         >>> meta = da.get_metadata("testing", "PTF10tce.fits", plugin="DID_COLUMN")
         >>> print(meta["bytes"], meta["adler32"])
         """
+        # Validated outside handle_exceptions, which would turn the ValueError
+        # into a plain Exception.
         if plugin not in METADATA_PLUGINS:
             raise ValueError(
                 "plugin must be one of {plugins}, not {plugin!r}".format(
                     plugins=", ".join(METADATA_PLUGINS), plugin=plugin)
             )
+        return self._get_metadata(namespace, name, plugin)
+
+    @handle_exceptions
+    @exchange_token_for_service("data-management-api")
+    @refresh_token_if_expired
+    def _get_metadata(self, namespace, name, plugin):
         url = "{api}/metadata/{ns}/{name}".format(
             api=self.srcnet_dm_api_base_address, ns=namespace, name=name
         )

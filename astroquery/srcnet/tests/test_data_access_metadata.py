@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from astroquery.srcnet.core import SRCNetClass
 from astroquery.srcnet.data_access import DataAccessClass
@@ -32,7 +33,7 @@ def test_get_metadata_did_column(da):
 
 def test_get_metadata_rejects_an_unknown_plugin(da):
     # The API would silently fall back to POSTGRES_JSON, so refuse it here.
-    with pytest.raises(Exception, match="plugin must be one of POSTGRES_JSON, DID_COLUMN"):
+    with pytest.raises(ValueError, match="plugin must be one of POSTGRES_JSON, DID_COLUMN"):
         da.get_metadata("ns", "name", plugin="did_column")
     da.session.get.assert_not_called()
 
@@ -44,3 +45,11 @@ def test_srcnet_get_metadata_forwards_plugin():
     srcnet.get_metadata("ns", "name", plugin="DID_COLUMN")
 
     srcnet._data_access.get_metadata.assert_called_once_with("ns", "name", plugin="DID_COLUMN")
+
+
+def test_get_metadata_http_errors_are_still_wrapped(da):
+    error = MagicMock(text='{"detail": "No metadata found"}')
+    da.session.get.return_value.raise_for_status.side_effect = requests.HTTPError("404", response=error)
+
+    with pytest.raises(Exception, match='Error during request: 404, response: {"detail": "No metadata found"}'):
+        da.get_metadata("ns", "name")
