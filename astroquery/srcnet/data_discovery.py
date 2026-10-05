@@ -45,10 +45,12 @@ Switch environment::
 from __future__ import annotations
 
 import re
+import warnings
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
+import numpy as np
 import pyvo
 import requests
 from astropy.coordinates import SkyCoord
@@ -198,8 +200,11 @@ class SearchFilters:
     position : ``(coordinates, radius)`` tuple, or use :meth:`set_position`
         Cone search — ``coordinates`` an `~astropy.coordinates.SkyCoord`,
         ``radius`` an `~astropy.units.Quantity`, e.g. ``0.5 * u.deg``.
+        Matches every observation whose footprint (``s_region``) overlaps
+        the circle (``INTERSECTS``).
     obs_publisher_did : list of str
-        Exact-match publisher DIDs (``IN (...)``).
+        Exact-match publisher DIDs (``IN (...)``). An empty list matches
+        nothing.
     dataproduct_type : str
         ``""`` = match a blank/NULL ``dataproduct_type``; never set = no
         filter; anything else = exact match, ignoring case.
@@ -213,12 +218,14 @@ class SearchFilters:
         Exact match on ``instrument_name``, ignoring case.
     namespace : str
         Rucio DID namespace, matched as a prefix on ``obs_id``
-        (``obs_id LIKE 'namespace:%'``) — the same convention-dependent split
+        (``obs_id LIKE 'namespace:%'``, with ``%``, ``_`` and ``\\`` in the
+        value matched literally) — the same convention-dependent split
         the Gateway itself relies on today, not a real Argus column. Nothing
         in the ObsCore standard requires ``obs_id`` to encode this.
     filename : str
         Rucio DID filename, matched as a suffix on ``obs_id``
-        (``obs_id LIKE '%:filename'``) — same caveat as *namespace*.
+        (``obs_id LIKE '%:filename'``, value matched literally) — same caveat
+        as *namespace*.
     """
 
     #: Fields settable via :meth:`add_filter`. ``"position"`` takes a
@@ -744,9 +751,10 @@ class DataDiscoveryClass:
     #   3. DISTANCE() is rejected outright ("DISTANCE not supported"), even
     #      for two literal points -- so a position filter can't compute
     #      angular_separation or sort "nearest first" the way
-    #      query_region()/the current Gateway do. search() falls back to no
-    #      further paging for a position search rather than claim an
-    #      ordering it can't produce.
+    #      query_region()/the current Gateway do. A position search is
+    #      ordered and paginated by obs_publisher_did like any other search
+    #      instead -- that needs no DISTANCE() (confirmed live: ~2s per page
+    #      for a cone with ~66k matches).
 
     def _build_where(self, filters: Optional[SearchFilters]) -> List[str]:
         """ANDed WHERE conditions for *filters* — shared by :meth:`search`,
@@ -760,16 +768,21 @@ class DataDiscoveryClass:
             dec = filters.coordinates.icrs.dec.deg
             r = filters.radius.to(u.deg).value
             # s_region, not s_ra/s_dec: s_region is indexed on Argus, s_ra/s_dec
-            # are not (MAN-827 §2). CONTAINS(s_region, ...) parses and executes
-            # fine against Argus today (confirmed live) even though the table
-            # is currently empty, so this can't yet be verified against real
-            # rows -- query_region() above is left on s_ra/s_dec so it keeps
-            # behaving exactly as before.
-            where.append(f"CONTAINS(s_region, CIRCLE('ICRS', {ra}, {dec}, {r})) = 1")
+            # are not (MAN-827 §2). INTERSECTS, not CONTAINS: CONTAINS(s_region,
+            # CIRCLE) only matches footprints lying wholly inside the circle --
+            # confirmed live against the CADC Argus mirror, a 0.05 deg circle on
+            # M31 gave 3,788 rows with CONTAINS and 66,339 with INTERSECTS.
+            # query_region() above is left on s_ra/s_dec so it keeps behaving
+            # exactly as before.
+            where.append(f"INTERSECTS(s_region, CIRCLE('ICRS', {ra}, {dec}, {r})) = 1")
 
-        if filters.obs_publisher_did:
-            in_list = ", ".join(f"'{_esc(d)}'" for d in filters.obs_publisher_did)
-            where.append(f"obs_publisher_did IN ({in_list})")
+        if filters.obs_publisher_did is not None:
+            if filters.obs_publisher_did:
+                in_list = ", ".join(f"'{_esc(d)}'" for d in filters.obs_publisher_did)
+                where.append(f"obs_publisher_did IN ({in_list})")
+            else:
+                # An empty DID list means "none of these", not "no filter".
+                where.append("1 = 0")
 
         if filters.dataproduct_type is not None:
             if filters.dataproduct_type == "":
@@ -797,29 +810,32 @@ class DataDiscoveryClass:
                 "instrument_name", filters.instrument, filters.is_case_sensitive("instrument"),
             ))
         if filters.namespace:
-            where.append(f"obs_id LIKE '{_esc(filters.namespace)}:%'")
+            where.append(f"obs_id LIKE '{_esc_like(filters.namespace)}:%'")
         if filters.filename:
-            where.append(f"obs_id LIKE '%:{_esc(filters.filename)}'")
+            where.append(f"obs_id LIKE '%:{_esc_like(filters.filename)}'")
 
         return where
 
-    def _has_position(self, filters: Optional[SearchFilters]) -> bool:
-        return filters is not None and filters.coordinates is not None and filters.radius is not None
+    def _select_columns(self, columns: str, filters: Optional[SearchFilters], paginating: bool) -> str:
+        """The SELECT list :meth:`search` actually uses — shared with
+        :meth:`explain` so what the latter shows always matches.
 
-    def _columns_with_order(self, columns: str, filters: Optional[SearchFilters]) -> str:
-        """Make sure a custom :meth:`~SearchFilters.set_order` field is present
-        in the SELECT list — needed both to read the cursor value back out of
-        the result for ``next_after``, and so ``ORDER BY`` never silently
-        sorts by a column the caller can't see in what came back. Shared by
-        :meth:`search` and :meth:`explain` so what the latter shows always
-        matches what the former actually selects."""
-        if filters is None or filters.order is None:
-            return columns
-        field = filters.order[0]
+        A paginated search needs the cursor back out of every page:
+        ``obs_publisher_did`` always, plus a custom
+        :meth:`~SearchFilters.set_order` field (which also keeps ``ORDER BY``
+        from sorting by a column the caller can't see). Both are appended
+        when the caller's *columns* leave them out."""
         existing = {c.strip() for c in columns.split(",")}
-        if field in existing:
-            return columns
-        return f"{columns}, {field}"
+        needed = []
+        if filters is not None and filters.order is not None:
+            needed.append(filters.order[0])
+        if paginating:
+            needed.append("obs_publisher_did")
+        for field in needed:
+            if field not in existing:
+                columns = f"{columns}, {field}"
+                existing.add(field)
+        return columns
 
     def _search_adql(
         self,
@@ -837,34 +853,26 @@ class DataDiscoveryClass:
         that case rather than silently building a WHERE clause nothing will
         ever page through.
 
-        A position filter drops ordering entirely (see :meth:`search`'s
-        docstring on why). Otherwise: no :meth:`SearchFilters.set_order` means
-        the existing ``ORDER BY obs_publisher_did ASC`` default, unchanged; a
-        custom order adds ``obs_publisher_did`` as a secondary sort key for
-        determinism, and — when paginating (*after* given, *top_n* not
-        ``None``) — needs the cursor's *order_value* half (see
-        :func:`_decode_cursor`) to build a tie-breaking condition, since
+        No :meth:`SearchFilters.set_order` means the existing
+        ``ORDER BY obs_publisher_did ASC`` default, unchanged — position
+        searches included. A custom order adds ``obs_publisher_did`` as a
+        secondary sort key for determinism, and — when paginating (*after*
+        given, *top_n* not ``None``) — needs the cursor's *order_value* half
+        (see :func:`_decode_cursor`) to build a tie-breaking condition, since
         ``obs_publisher_did`` alone can no longer bound "everything after this
         row" once the primary sort is on a different, possibly-repeated field.
+        See :func:`_after_condition` for how NULL order values are handled.
         """
         where = self._build_where(filters)
-        has_position = self._has_position(filters)
         order = None if filters is None else filters.order
         paginating = top_n is not None
 
-        if has_position:
-            order_by = None
-        elif order is not None:
+        if order is not None:
             field, direction = order
             order_by = f"{field} {direction}, obs_publisher_did ASC"
             if after and paginating:
                 order_value, did_value = _decode_cursor(after)
-                cmp_op = ">" if direction == "ASC" else "<"
-                literal = _sql_literal(order_value)
-                where = where + [
-                    f"({field} {cmp_op} {literal} OR "
-                    f"({field} = {literal} AND obs_publisher_did > '{_esc(did_value)}'))"
-                ]
+                where = where + [_after_condition(field, direction, order_value, did_value)]
         else:
             order_by = "obs_publisher_did ASC"
             if after and paginating:
@@ -904,12 +912,11 @@ class DataDiscoveryClass:
         back in as *after* to get the next page; it's ``None`` once there are
         no more rows.
 
-        A position filter (*filters.coordinates* set) drops the keyset order:
-        ``angular_separation``/"nearest first" isn't available either —
-        ``DISTANCE()`` is rejected server-side (confirmed live, even for two
-        literal points: ``DISTANCE not supported``) — so a position search
-        just returns up to *page_size* rows with no further pages, rather
-        than claim an ordering this service can't produce.
+        A position filter (*filters.coordinates* set) is paginated the same
+        way. It can't be sorted "nearest first" or report
+        ``angular_separation``: ``DISTANCE()`` is rejected server-side
+        (confirmed live, even for two literal points: ``DISTANCE not
+        supported``).
 
         Pagination is opt-in, not the only mode: pass ``page_size=None`` for
         an unbounded search — no ``TOP`` at all, just ``maxrec`` as a plain
@@ -936,6 +943,9 @@ class DataDiscoveryClass:
             default) searches everything.
         columns : str, optional
             ADQL column list. Defaults to :attr:`DEFAULT_SEARCH_COLUMNS`.
+            When paginating, ``obs_publisher_did`` (and any
+            :meth:`~SearchFilters.set_order` field) is appended if missing,
+            since the next-page cursor is read from it.
         after : str, optional
             Keyset cursor — see above. Ignored when *page_size* is ``None``.
         page_size : int or None, optional
@@ -969,21 +979,14 @@ class DataDiscoveryClass:
         >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
         >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
         """
-        columns = self._columns_with_order(columns or self.DEFAULT_SEARCH_COLUMNS, filters)
-        has_position = self._has_position(filters)
-        order = None if filters is None else filters.order
         unbounded = page_size is None
+        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, not unbounded)
+        order = None if filters is None else filters.order
         # Fetch one extra row to learn whether another page exists, without a
         # second round trip or an OFFSET this service doesn't support; trimmed
-        # back to page_size before returning. Only for the keyset-paginated
-        # case: a position search never exposes a next page (next_after is
-        # forced to None below regardless -- see the class docstring), so
-        # asking for one more row there would just fetch something we always
-        # throw away -- likewise unbounded mode has no "next page" to detect
-        # at all. fetch_n is also what explain() must show for parity -- it
-        # takes the same has_position/unbounded-dependent value, so what
-        # explain() displays and what search() actually runs never diverge.
-        fetch_n = None if unbounded else (page_size if has_position else page_size + 1)
+        # back to page_size before returning. Unbounded mode has no "next
+        # page" to detect at all.
+        fetch_n = None if unbounded else page_size + 1
         adql = self._search_adql(filters, columns, after, fetch_n)
 
         if verbose:
@@ -991,7 +994,7 @@ class DataDiscoveryClass:
 
         table = self.query(adql, maxrec=fetch_n)
 
-        has_more = (not unbounded) and (not has_position) and len(table) > page_size
+        has_more = (not unbounded) and len(table) > page_size
         if has_more:
             table = table[:page_size]
 
@@ -1021,6 +1024,7 @@ class DataDiscoveryClass:
         group_by: Optional[List[str]] = None,
         filters: Optional[SearchFilters] = None,
         *,
+        max_groups: int = 500,
         verbose: bool = False,
     ) -> Table:
         """
@@ -1035,19 +1039,31 @@ class DataDiscoveryClass:
             ``["dataproduct_type"]``, matching MAN-827's stated default.
         filters : SearchFilters, optional
             Same filter object :meth:`search` takes.
+        max_groups : int, optional
+            Most groups to return (largest first). If the result reaches this
+            limit, a warning says it may be truncated; pass a larger value to
+            get the rest.
         verbose : bool, optional
             Print the generated ADQL before executing.
 
         Returns
         -------
         `~astropy.table.Table`
-            One row per group, plus ``num_records``.
+            One row per group (up to *max_groups*), plus ``num_records``.
+
+        Raises
+        ------
+        ValueError
+            If a *group_by* field isn't a real ``ivoa.ObsCore`` column.
 
         Examples
         --------
         >>> DataDiscovery.count_by(["dataproduct_type", "facility_name"])
         """
         group_by = group_by or ["dataproduct_type"]
+        unknown = [field for field in group_by if field not in _OBSCORE_COLUMNS]
+        if unknown:
+            raise ValueError(f"unknown ivoa.ObsCore column(s) for count_by: {', '.join(map(repr, unknown))}")
         cols = ", ".join(group_by)
         where = self._build_where(filters)
 
@@ -1058,7 +1074,13 @@ class DataDiscoveryClass:
 
         if verbose:
             print(f"[ADQL] {adql}")
-        return self.query(adql, maxrec=500)
+        table = self.query(adql, maxrec=max_groups)
+        if len(table) >= max_groups:
+            warnings.warn(
+                f"count_by returned {len(table)} groups, the max_groups limit; there may be more. "
+                "Pass a larger max_groups to get them."
+            )
+        return table
 
     def explain(
         self,
@@ -1075,7 +1097,7 @@ class DataDiscoveryClass:
         Built through the exact same :meth:`_search_adql` helper
         :meth:`search` uses, so this can never drift out of sync with what
         ``search(filters)`` actually does. The one difference: for a
-        keyset-paginated (non-position) search this shows ``TOP page_size``,
+        keyset-paginated search this shows ``TOP page_size``,
         not the ``page_size + 1`` :meth:`search` fetches internally to detect
         whether another page exists — that's an implementation detail of
         pagination, not something a user editing this ADQL in a "show query"
@@ -1103,7 +1125,7 @@ class DataDiscoveryClass:
         >>> DataDiscovery.explain(SearchFilters().add_filter("collection", "JCMT"))
         "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did ASC"
         """
-        columns = self._columns_with_order(columns or self.DEFAULT_SEARCH_COLUMNS, filters)
+        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, page_size is not None)
         return self._search_adql(filters, columns, after, page_size)
 
     def execute_adql(
@@ -1462,6 +1484,15 @@ def _esc(s: str) -> str:
     return s.replace("'", "''")
 
 
+def _esc_like(s: str) -> str:
+    """Escape *s* for use inside an ADQL ``LIKE`` pattern, so ``%``, ``_`` and
+    ``\\`` in it match literally. ADQL 2.0 has no ``ESCAPE`` clause (Argus
+    accepts one but ignores it); Argus is PostgreSQL-backed, where backslash
+    is the default ``LIKE`` escape -- confirmed live against the CADC Argus
+    mirror: ``'dao\\_c182%'`` matches ``dao_c182...`` but not ``daoXc182...``."""
+    return _esc(s).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _exact_match_where(column: str, value: str, case_sensitive: bool) -> str:
     """``column = 'value'`` (case-sensitive) or ``UPPER(column) = UPPER('value')``
     (default) — the latter can cost more against a TAP service backed by a
@@ -1496,15 +1527,54 @@ def _encode_cursor(order_value, did_value) -> str:
     The plain (no custom order) case still uses a bare obs_publisher_did
     string as its cursor, unchanged -- this encoding is only used when there's
     a second value to carry."""
+    if _is_null(order_value):
+        return f"z{_CURSOR_SEP}{_CURSOR_SEP}{did_value}"
     tag = "s" if isinstance(order_value, str) else "n"
     return f"{tag}{_CURSOR_SEP}{order_value}{_CURSOR_SEP}{did_value}"
 
 
 def _decode_cursor(cursor: str) -> Tuple[object, str]:
-    """Inverse of :func:`_encode_cursor` -- returns ``(order_value, did_value)``."""
+    """Inverse of :func:`_encode_cursor` -- returns ``(order_value, did_value)``,
+    with ``order_value`` ``None`` for a NULL."""
     tag, order_repr, did_value = cursor.split(_CURSOR_SEP, 2)
+    if tag == "z":
+        return None, did_value
     order_value = order_repr if tag == "s" else float(order_repr)
     return order_value, did_value
+
+
+def _is_null(value) -> bool:
+    """Whether a table cell read back from a TAP result is NULL (masked, None
+    or a float NaN)."""
+    if value is None or value is np.ma.masked:
+        return True
+    try:
+        return bool(np.isnan(value))
+    except TypeError:
+        return False
+
+
+def _after_condition(field: str, direction: str, order_value, did_value: str) -> str:
+    """Keyset condition selecting the rows after ``(order_value, did_value)``
+    in ``ORDER BY field direction, obs_publisher_did ASC``.
+
+    NULLs follow the server's ordering, which Argus (PostgreSQL) puts last for
+    ``ASC`` and first for ``DESC`` -- confirmed live against the CADC Argus
+    mirror. So after a non-NULL value, ``ASC`` must still include the NULL
+    rows still to come; after a NULL (``order_value is None``), ``DESC`` must
+    include every non-NULL row, which all come later."""
+    did = f"'{_esc(did_value)}'"
+    if order_value is None:
+        nulls_after = f"({field} IS NULL AND obs_publisher_did > {did})"
+        if direction == "ASC":
+            return nulls_after
+        return f"({nulls_after} OR {field} IS NOT NULL)"
+    cmp_op = ">" if direction == "ASC" else "<"
+    literal = _sql_literal(order_value)
+    condition = f"{field} {cmp_op} {literal} OR ({field} = {literal} AND obs_publisher_did > {did})"
+    if direction == "ASC":
+        condition += f" OR {field} IS NULL"
+    return f"({condition})"
 
 
 def _add_namespace_filename_columns(table: Table) -> None:

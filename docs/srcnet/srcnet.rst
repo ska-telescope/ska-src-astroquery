@@ -584,7 +584,8 @@ Available fields: ``position`` (a ``(coordinates, radius)`` tuple — or use the
 (list, exact match), ``dataproduct_type``, ``target_name``, ``collection``,
 ``facility``, ``instrument`` (all exact match, ignoring case — narrower than
 ``query_observations``'s substring matching), and ``namespace``/``filename``
-(Rucio DID split, matched on ``obs_id``). ``add_filter`` raises ``ValueError``
+(Rucio DID split, matched on ``obs_id``; ``%``, ``_`` and ``\`` in the value
+match literally). An empty ``obs_publisher_did`` list matches nothing. ``add_filter`` raises ``ValueError``
 on an unrecognized field name rather than silently no-op'ing (so a typo like
 ``"colection"`` fails loudly instead of quietly matching more than intended).
 See the ``SearchFilters`` docstring (``help(SearchFilters)``) for the full
@@ -603,7 +604,10 @@ field-by-field reference, including match rules and caveats.
     >>> t = DataDiscovery.search(filters, page_size=50)
 
 A cone search sets the ``position`` field the same way, either via
-``add_filter`` directly or the ``set_position`` shortcut:
+``add_filter`` directly or the ``set_position`` shortcut. It matches every
+observation whose footprint (``s_region``) overlaps the circle, and is
+paginated like any other search. It can't be sorted nearest-first, because
+this TAP service rejects ``DISTANCE()``:
 
 .. code-block:: python
 
@@ -680,7 +684,9 @@ pagination cursor). Order by any other ``ivoa.ObsCore`` column instead with
 service that a custom ``ORDER BY`` is *not* affected by the ``OFFSET``
 restriction above; it combines with keyset pagination too, via a
 tie-breaking ``obs_publisher_did`` secondary sort so ordering stays
-deterministic even when *field* has duplicate values:
+deterministic even when *field* has duplicate values. Rows where *field* is
+NULL come last for ``ASC`` and first for ``DESC`` (the server's ordering), and
+pagination handles them:
 
 .. code-block:: python
 
@@ -688,11 +694,15 @@ deterministic even when *field* has duplicate values:
     >>> t = DataDiscovery.search(filters, page_size=50)
     >>> t2 = DataDiscovery.search(filters, page_size=50, after=t.meta["next_after"])
 
-``count_by`` returns grouped counts for the same filter object:
+``count_by`` returns grouped counts for the same filter object, largest
+first. Group fields must be ``ivoa.ObsCore`` columns (otherwise
+``ValueError``). At most ``max_groups`` groups are returned (default 500), with
+a warning when that limit is reached:
 
 .. code-block:: python
 
     >>> t = DataDiscovery.count_by(["dataproduct_type", "facility_name"], filters)
+    >>> t = DataDiscovery.count_by(["obs_id"], filters, max_groups=5000)
 
 ``explain`` returns the ADQL ``search`` would run for a given filter set,
 without executing it — useful for a "show me the query" step before running it:

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 from astropy.coordinates import SkyCoord
-from astropy.table import Table
+from astropy.table import MaskedColumn, Table
 import astropy.units as u
 
 from astroquery.srcnet.data_discovery import (
@@ -417,8 +417,10 @@ class TestQueryNaturalDd:
 from astroquery.srcnet.data_discovery import (
     SearchFilters,
     _add_namespace_filename_columns,
+    _after_condition,
     _decode_cursor,
     _encode_cursor,
+    _esc_like,
 )
 
 
@@ -545,9 +547,24 @@ class TestBuildWhere:
         f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
         where = dd._build_where(f)
         assert len(where) == 1
-        assert "CONTAINS(s_region, CIRCLE('ICRS', 10.0, 20.0, 0.5)) = 1" == where[0]
         assert "s_ra" not in where[0]
         assert "s_dec" not in where[0]
+
+    def test_position_matches_overlapping_footprints(self, dd):
+        # INTERSECTS, not CONTAINS(s_region, CIRCLE), which only matches
+        # footprints lying wholly inside the circle.
+        f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
+        assert dd._build_where(f) == ["INTERSECTS(s_region, CIRCLE('ICRS', 10.0, 20.0, 0.5)) = 1"]
+
+    def test_empty_did_list_matches_nothing(self, dd):
+        f = SearchFilters().add_filter("obs_publisher_did", [])
+        assert dd._build_where(f) == ["1 = 0"]
+
+    def test_namespace_and_filename_match_wildcards_literally(self, dd):
+        f = SearchFilters().add_filter("namespace", "srcnet_test.comm").add_filter("filename", "50%_x.fits")
+        where = dd._build_where(f)
+        assert "obs_id LIKE 'srcnet\\_test.comm:%'" in where
+        assert "obs_id LIKE '%:50\\%\\_x.fits'" in where
 
     def test_position_requires_both_coordinates_and_radius(self, dd):
         f = SearchFilters().add_filter("position", (SkyCoord(10.0, 20.0, unit="deg"), None))  # no radius
@@ -655,10 +672,10 @@ class TestExplain:
         adql = dd.explain()
         assert "ORDER BY obs_publisher_did" in adql
 
-    def test_no_order_by_with_position(self, dd):
+    def test_position_search_is_ordered_by_did(self, dd):
         f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
         adql = dd.explain(f)
-        assert "ORDER BY" not in adql
+        assert adql.endswith("ORDER BY obs_publisher_did ASC")
 
     def test_top_is_exactly_page_size_not_page_size_plus_one(self, dd):
         # search() internally fetches page_size + 1 to detect another page;
@@ -670,10 +687,10 @@ class TestExplain:
         adql = dd.explain(after="abc123")
         assert "obs_publisher_did > 'abc123'" in adql
 
-    def test_after_ignored_with_position(self, dd):
+    def test_after_applies_with_position(self, dd):
         f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
         adql = dd.explain(f, after="abc123")
-        assert "abc123" not in adql
+        assert "obs_publisher_did > 'abc123'" in adql
 
     def test_matches_search_where_clause(self, dd):
         # explain() and search() must never disagree -- same _build_where call.
@@ -720,34 +737,33 @@ class TestSearch:
         assert len(result) == 3
         assert result.meta["next_after"] == "did002"  # last row AFTER trimming
 
-    def test_position_search_never_sets_next_after(self, dd):
+    def test_position_search_paginates(self, dd):
+        # More matches than page_size: the rest must stay reachable.
         f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
-        with patch.object(dd, "query", return_value=self._rows(4)):
+        with patch.object(dd, "query", return_value=self._rows(4)) as mock_query:
             result = dd.search(f, page_size=3)
-        assert result.meta["next_after"] is None
+        assert mock_query.call_args[1]["maxrec"] == 4
+        assert len(result) == 3
+        assert result.meta["next_after"] == "did002"
 
-    def test_position_search_requests_exactly_page_size_not_plus_one(self, dd):
-        # A position search never exposes a next page (previous test), so the
-        # +1-to-detect-another-page trick buys it nothing -- asking for one
-        # more row than the caller requested was a real, needless bug once
-        # spotted live (page_size=100 default produced "TOP 101").
-        f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
-        with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
-            dd.search(f, page_size=10)
-        assert mock_query.call_args[1]["maxrec"] == 10
-        assert "TOP 10 " in mock_query.call_args[0][0]
-        assert "TOP 11" not in mock_query.call_args[0][0]
-
-    def test_position_search_matches_explain_exactly(self, dd):
-        # search() and explain() must agree on what TOP value a position
-        # search actually runs -- they didn't before the fix above (explain()
-        # already showed the plain page_size; search() silently asked for
-        # page_size + 1 regardless of has_position).
+    def test_position_search_matches_explain_apart_from_top(self, dd):
         f = SearchFilters().set_position(SkyCoord(10.0, 20.0, unit="deg"), 0.5 * u.deg)
         explained = dd.explain(f, page_size=10)
         with patch.object(dd, "query", return_value=self._rows(3)) as mock_query:
             dd.search(f, page_size=10)
-        assert mock_query.call_args[0][0] == explained
+        assert mock_query.call_args[0][0] == explained.replace("TOP 10 ", "TOP 11 ")
+
+    def test_custom_columns_without_did_still_paginate(self, dd):
+        rows = self._rows(4)
+        with patch.object(dd, "query", return_value=rows) as mock_query:
+            result = dd.search(columns="target_name, obs_id", page_size=3)
+        assert mock_query.call_args[0][0].startswith("SELECT TOP 4 target_name, obs_id, obs_publisher_did ")
+        assert result.meta["next_after"] == "did002"
+
+    def test_unbounded_search_keeps_custom_columns_as_given(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(2)) as mock_query:
+            dd.search(columns="target_name", page_size=None)
+        assert mock_query.call_args[0][0].startswith("SELECT target_name FROM ")
 
     def test_split_obs_id_default_adds_columns(self, dd):
         with patch.object(dd, "query", return_value=self._rows(2)):
@@ -880,30 +896,34 @@ class TestCursorEncoding:
         assert result.meta["next_after"] == "did001"
 
 
-class TestColumnsWithOrder:
-    """_columns_with_order() -- auto-appends a custom set_order() field to
-    the SELECT list so next_after can read it back and explain()/search()
-    never silently disagree on what's selected."""
+class TestSelectColumns:
+    """_select_columns() -- auto-appends what the next-page cursor is read
+    from (obs_publisher_did, and a custom set_order() field) so explain()
+    and search() never disagree on what's selected."""
 
     def test_no_filters_returns_columns_unchanged(self, dd):
-        cols = dd._columns_with_order(dd.DEFAULT_SEARCH_COLUMNS, None)
+        cols = dd._select_columns(dd.DEFAULT_SEARCH_COLUMNS, None, True)
         assert cols == dd.DEFAULT_SEARCH_COLUMNS
 
     def test_no_order_returns_columns_unchanged(self, dd):
         f = SearchFilters().add_filter("collection", "JCMT")
-        cols = dd._columns_with_order(dd.DEFAULT_SEARCH_COLUMNS, f)
+        cols = dd._select_columns(dd.DEFAULT_SEARCH_COLUMNS, f, True)
         assert cols == dd.DEFAULT_SEARCH_COLUMNS
 
     def test_order_field_already_present_not_duplicated(self, dd):
         f = SearchFilters().set_order("obs_id")  # obs_id is in DEFAULT_SEARCH_COLUMNS
-        cols = dd._columns_with_order(dd.DEFAULT_SEARCH_COLUMNS, f)
+        cols = dd._select_columns(dd.DEFAULT_SEARCH_COLUMNS, f, True)
         assert cols == dd.DEFAULT_SEARCH_COLUMNS
         assert cols.count("obs_id") == 1
 
     def test_order_field_missing_is_appended(self, dd):
         f = SearchFilters().set_order("t_min")
-        cols = dd._columns_with_order(dd.DEFAULT_SEARCH_COLUMNS, f)
+        cols = dd._select_columns(dd.DEFAULT_SEARCH_COLUMNS, f, True)
         assert cols == f"{dd.DEFAULT_SEARCH_COLUMNS}, t_min"
+
+    def test_did_appended_only_when_paginating(self, dd):
+        assert dd._select_columns("target_name", None, True) == "target_name, obs_publisher_did"
+        assert dd._select_columns("target_name", None, False) == "target_name"
 
 
 class TestSearchCustomOrder:
@@ -936,10 +956,27 @@ class TestSearchCustomOrder:
         assert "WHERE" not in adql
 
     def test_after_adds_tiebreak_condition_asc(self, dd):
+        # NULLs sort last for ASC on Argus, so they are still to come.
         f = SearchFilters().set_order("t_min", "ASC")
         cursor = _encode_cursor(59000.0, "did000")
         adql = dd.explain(f, after=cursor, page_size=10)
-        assert "(t_min > 59000.0 OR (t_min = 59000.0 AND obs_publisher_did > 'did000'))" in adql
+        assert ("(t_min > 59000.0 OR (t_min = 59000.0 AND obs_publisher_did > 'did000') "
+                "OR t_min IS NULL)") in adql
+
+    def test_page_ending_on_null_gives_a_null_cursor(self, dd):
+        rows = self._rows(4)
+        rows["t_min"] = MaskedColumn(rows["t_min"], mask=[False, True, True, True])
+        with patch.object(dd, "query", return_value=rows):
+            result = dd.search(SearchFilters().set_order("t_min"), page_size=3)
+        assert _decode_cursor(result.meta["next_after"]) == (None, "did002")
+
+    def test_after_a_null_cursor(self, dd):
+        cursor = _encode_cursor(None, "did002")
+        asc = dd.explain(SearchFilters().set_order("t_min", "ASC"), after=cursor, page_size=10)
+        desc = dd.explain(SearchFilters().set_order("t_min", "DESC"), after=cursor, page_size=10)
+        assert "(t_min IS NULL AND obs_publisher_did > 'did002')" in asc
+        assert "OR t_min IS NOT NULL" not in asc
+        assert "((t_min IS NULL AND obs_publisher_did > 'did002') OR t_min IS NOT NULL)" in desc
 
     def test_after_adds_tiebreak_condition_desc(self, dd):
         # DESC flips the comparison operator: next page is *smaller* t_min.
@@ -1025,6 +1062,28 @@ class TestCountBy:
             dd.count_by(verbose=True)
         assert "[ADQL]" in capsys.readouterr().out
 
+    def test_unknown_group_by_field_raises(self, dd):
+        with patch.object(dd, "query") as mock_query:
+            with pytest.raises(ValueError, match="'facilty_name'"):
+                dd.count_by(group_by=["dataproduct_type", "facilty_name"])
+        mock_query.assert_not_called()
+
+    def test_max_groups_is_the_row_cap(self, dd):
+        with patch.object(dd, "query", return_value=Table({"obs_id": ["a"], "num_records": [1]})) as mock_query:
+            dd.count_by(group_by=["obs_id"], max_groups=2000)
+        assert mock_query.call_args[1]["maxrec"] == 2000
+
+    def test_warns_when_max_groups_is_reached(self, dd):
+        full = Table({"obs_id": ["a", "b"], "num_records": [2, 1]})
+        with patch.object(dd, "query", return_value=full):
+            with pytest.warns(UserWarning, match="max_groups"):
+                dd.count_by(group_by=["obs_id"], max_groups=2)
+
+    def test_no_warning_below_max_groups(self, dd, recwarn):
+        with patch.object(dd, "query", return_value=Table({"obs_id": ["a"], "num_records": [1]})):
+            dd.count_by(group_by=["obs_id"], max_groups=2)
+        assert not [w for w in recwarn if "max_groups" in str(w.message)]
+
 
 class TestExecuteAdql:
     """execute_adql() — Q5: run free-form ADQL, capped by max_rows (no OFFSET)."""
@@ -1101,3 +1160,19 @@ class TestAddNamespaceFilenameColumns:
         _add_namespace_filename_columns(t)  # must not raise
         assert "namespace" in t.colnames
         assert "filename" in t.colnames
+
+
+class TestNullSafeKeyset:
+    """_after_condition()/_esc_like() -- pure helpers behind the NULL-aware
+    cursor and literal LIKE matching (behaviour confirmed live on Argus)."""
+
+    def test_desc_after_value_excludes_nulls(self):
+        # NULLs sort first for DESC on Argus, so they are already behind us.
+        assert _after_condition("t_min", "DESC", 5.0, "d1") == \
+            "(t_min < 5.0 OR (t_min = 5.0 AND obs_publisher_did > 'd1'))"
+
+    def test_esc_like_escapes_wildcards_quotes_and_backslash(self):
+        assert _esc_like("o'k_50%\\x") == "o''k\\_50\\%\\\\x"
+
+    def test_nan_order_value_is_a_null_cursor(self):
+        assert _decode_cursor(_encode_cursor(float("nan"), "d9")) == (None, "d9")
