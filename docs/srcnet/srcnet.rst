@@ -570,6 +570,148 @@ instrument, and target name — no ADQL required.
     ...     target_name="Orion",
     ... )
 
+SearchFilters, search, count_by, explain
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``SearchFilters`` is a single filter object shared by ``search``, ``count_by``
+and ``explain`` — build it up with ``add_filter(field, value)`` (chainable —
+each call returns ``self``) rather than passing every field as a constructor
+keyword, and all three methods interpret it identically, unlike
+``query_region``/``query_name``/``query_observations`` above, which each take
+their own separate keyword arguments and can't be combined in one call.
+Available fields: ``position`` (a ``(coordinates, radius)`` tuple — or use the
+``set_position(coordinates, radius)`` convenience wrapper), ``obs_publisher_did``
+(list, exact match), ``dataproduct_type``, ``target_name``, ``collection``,
+``facility``, ``instrument`` (all exact match, ignoring case — narrower than
+``query_observations``'s substring matching), and ``namespace``/``filename``
+(Rucio DID split, matched on ``obs_id``; ``%``, ``_`` and ``\`` in the value
+match literally). An empty ``obs_publisher_did`` list matches nothing. ``add_filter`` raises ``ValueError``
+on an unrecognized field name rather than silently no-op'ing (so a typo like
+``"colection"`` fails loudly instead of quietly matching more than intended).
+See the ``SearchFilters`` docstring (``help(SearchFilters)``) for the full
+field-by-field reference, including match rules and caveats.
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import DataDiscovery, SearchFilters
+
+    >>> filters = (
+    ...     SearchFilters()
+    ...     .add_filter("collection", "JCMT")
+    ...     .add_filter("dataproduct_type", "image")
+    ...     .add_filter("instrument", "SCUBA-2")
+    ... )
+    >>> t = DataDiscovery.search(filters, page_size=50)
+
+A cone search sets the ``position`` field the same way, either via
+``add_filter`` directly or the ``set_position`` shortcut. It matches every
+observation whose footprint (``s_region``) overlaps the circle, and is
+paginated like any other search. It can't be sorted nearest-first, because
+this TAP service rejects ``DISTANCE()``:
+
+.. code-block:: python
+
+    >>> from astropy.coordinates import SkyCoord
+    >>> import astropy.units as u
+
+    >>> pos_filters = SearchFilters().set_position(
+    ...     SkyCoord(83.8, -5.4, unit="deg"), 0.5 * u.deg
+    ... )
+    >>> t = DataDiscovery.search(pos_filters, page_size=50)
+
+``dataproduct_type``, ``target_name``, ``collection``, ``facility`` and
+``instrument`` match case-insensitively by default (``UPPER(col) = UPPER('value')``).
+``UPPER(col)`` *can* cost more than a plain ``col = 'value'`` comparison on a
+TAP service backed by a real database, since it can prevent the query planner
+from using a plain index on *col*. Paired timing tests against a populated
+Argus deployment gave contradictory results in both directions, though — response-time
+variance on that shared, third-party service was larger than whatever effect
+``UPPER()`` has on its own — so treat ``case_sensitive`` as an untested-but-plausible
+optimization to try on your own deployment, not a guaranteed speedup. Pass
+``case_sensitive=True`` when you know the value is consistently cased in your
+data (collection codes usually are) to get a plain ``col = 'value'`` comparison
+instead:
+
+.. code-block:: python
+
+    >>> filters = SearchFilters().add_filter("collection", "JCMT", case_sensitive=True)
+
+``add_filter`` raises ``ValueError`` if ``case_sensitive`` is passed for a field
+that has no case-insensitive default to opt out of (``position``,
+``obs_publisher_did``, ``namespace``, ``filename``).
+
+``search`` paginates by keyset, not by page number: pass the previous page's
+``t.meta["next_after"]`` back in as ``after`` to get the next page (``None``
+once there are no more rows). Pass ``with_total_count=True`` to also get a
+filter-scoped row count in ``t.meta["total_count"]``.
+
+.. code-block:: python
+
+    >>> page1 = DataDiscovery.search(filters, page_size=50, with_total_count=True)
+    >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+
+There's no way to jump straight to page *N* the way ``OFFSET`` would (confirmed
+live that this TAP service rejects ``OFFSET`` outright), so getting to a
+specific page means walking forward one page at a time until you reach it:
+
+.. code-block:: python
+
+    >>> def get_page(filters, n, page_size=50):
+    ...     """Walk forward to page n (1-indexed) via the keyset cursor."""
+    ...     after = None
+    ...     for _ in range(n):
+    ...         page = DataDiscovery.search(filters, page_size=page_size, after=after)
+    ...         after = page.meta["next_after"]
+    ...         if after is None:
+    ...             break  # ran out of rows before reaching page n
+    ...     return page
+
+    >>> page3 = get_page(filters, 3, page_size=50)
+
+Pagination is opt-in, not the only mode — pass ``page_size=None`` for an
+unbounded search (no ``TOP`` at all, just the same ``maxrec`` safety cap
+``query``/``execute_adql`` already use by default) when you just want
+everything matching the filters and don't care about paging through a
+UI-sized page at a time:
+
+.. code-block:: python
+
+    >>> everything = DataDiscovery.search(filters, page_size=None)
+
+By default, results are ordered by ``obs_publisher_did`` (the keyset
+pagination cursor). Order by any other ``ivoa.ObsCore`` column instead with
+``set_order(field, direction)`` — confirmed live against the SRCNet TAP
+service that a custom ``ORDER BY`` is *not* affected by the ``OFFSET``
+restriction above; it combines with keyset pagination too, via a
+tie-breaking ``obs_publisher_did`` secondary sort so ordering stays
+deterministic even when *field* has duplicate values. Rows where *field* is
+NULL come last for ``ASC`` and first for ``DESC`` (the server's ordering), and
+pagination handles them:
+
+.. code-block:: python
+
+    >>> filters.set_order("t_min", "DESC")  # chains, like add_filter
+    >>> t = DataDiscovery.search(filters, page_size=50)
+    >>> t2 = DataDiscovery.search(filters, page_size=50, after=t.meta["next_after"])
+
+``count_by`` returns grouped counts for the same filter object, largest
+first. Group fields must be ``ivoa.ObsCore`` columns (otherwise
+``ValueError``). At most ``max_groups`` groups are returned (default 500), with
+a warning when that limit is reached:
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.count_by(["dataproduct_type", "facility_name"], filters)
+    >>> t = DataDiscovery.count_by(["obs_id"], filters, max_groups=5000)
+
+``explain`` returns the ADQL ``search`` would run for a given filter set,
+without executing it — useful for a "show me the query" step before running it:
+
+.. code-block:: python
+
+    >>> print(DataDiscovery.explain(filters))
+    SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') AND ...
+
 get_artifacts
 ^^^^^^^^^^^^^
 
@@ -594,6 +736,29 @@ Execute an arbitrary ADQL statement against the CAOM2 TAP service.
     ...     GROUP BY o.collection
     ...     ORDER BY n DESC
     ... """)
+
+execute_adql, count_adql
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Named alternatives to ``query`` for free-form ADQL, row-capped rather than
+paginated — the TAP service the SRCNet Data Discovery client targets rejects
+``OFFSET`` outright, so there is no page-number pagination for a free-form
+query the way there is for ``search`` above (keyset pagination via ``after``).
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.execute_adql("SELECT TOP 20 * FROM ivoa.ObsCore", max_rows=20)
+
+``count_adql`` returns a row count for a free-form query by executing it and
+measuring the result, capped at ``max_rows`` — not an unbounded ``COUNT(*)``,
+and deliberately not implemented as the more familiar
+``SELECT COUNT(*) FROM (...)`` wrapping trick, since the same TAP service also
+rejects sub-selects in ``FROM`` outright.
+
+.. code-block:: python
+
+    >>> t = DataDiscovery.count_adql("SELECT * FROM ivoa.ObsCore WHERE dataproduct_type = 'image'")
+    >>> t["num_records"][0]
 
 nl_to_adql (data)
 ^^^^^^^^^^^^^^^^^

@@ -30,6 +30,12 @@ Simple usage via the module singleton::
     adql = DataDiscovery.nl_to_adql("how many observations per collection?")
     print(adql)
 
+    # Typed shortcuts (no ADQL to write) -- any combination of filters
+    filters = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image")
+    results = DataDiscovery.search(filters)
+    counts = DataDiscovery.count_by(["dataproduct_type"], filters)
+    adql = DataDiscovery.explain(filters)  # what search() would run, unexecuted
+
 Switch environment::
 
     from astroquery.srcnet import conf
@@ -39,10 +45,12 @@ Switch environment::
 from __future__ import annotations
 
 import re
+import warnings
 import xml.etree.ElementTree as ET
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
+import numpy as np
 import pyvo
 import requests
 from astropy.coordinates import SkyCoord
@@ -53,7 +61,7 @@ from urllib3.util.retry import Retry
 
 from ._helpdesk import srcnet_raise
 
-__all__ = ["DataDiscovery", "DataDiscoveryClass"]
+__all__ = ["DataDiscovery", "DataDiscoveryClass", "SearchFilters"]
 
 
 # ── NL → ADQL prompt ──────────────────────────────────────────────────────────
@@ -82,6 +90,34 @@ except ImportError:
         "  access_format      - MIME type of the data product\n"
     )
 
+
+def _parse_obscore_columns(schema_text: str) -> frozenset:
+    """Real ``ivoa.ObsCore`` column names, parsed out of the same schema block
+    used for the NL prompt above -- so :meth:`SearchFilters.set_order`'s
+    validation reflects the actual, live-introspected schema (see
+    ``schemas.py``'s own header: auto-generated from a live TAP query), not a
+    second, hand-maintained list that could drift from it.
+    """
+    columns: list = []
+    in_block = False
+    for line in schema_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ivoa.ObsCore") and not stripped.startswith("ivoa.ObsCore_radio"):
+            in_block = True
+            continue
+        if in_block:
+            if not stripped:
+                break
+            match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)", stripped)
+            if match:
+                columns.append(match.group(1))
+    return frozenset(columns)
+
+
+#: Every real column on ivoa.ObsCore -- valid targets for
+#: :meth:`SearchFilters.set_order`.
+_OBSCORE_COLUMNS = _parse_obscore_columns(_TAP_OBSCORE_SCHEMA)
+
 _NL_TO_ADQL_PROMPT = (
     "You are an expert in ADQL (Astronomical Data Query Language), which is a superset\n"
     "of SQL used to query astronomical TAP services.\n"
@@ -101,6 +137,265 @@ _NL_TO_ADQL_PROMPT = (
     "\n"
     "Question: {question}\n"
 )
+
+
+# ── Shared filter object ───────────────────────────────────────────────────────
+
+class SearchFilters:
+    """
+    Shared filter object for :meth:`DataDiscoveryClass.search`,
+    :meth:`~DataDiscoveryClass.count_by` and :meth:`~DataDiscoveryClass.explain`.
+
+    Construct empty and add filters incrementally with :meth:`add_filter`
+    (chainable — each call returns *self*), rather than setting every field as
+    a constructor keyword. Every field is optional and independent — add any
+    combination, or none, and it applies equally to all three methods (they
+    build the WHERE clause through the exact same internal helper, so they can
+    never disagree on what a given filter set means).
+
+    Examples
+    --------
+    >>> filters = (
+    ...     SearchFilters()
+    ...     .add_filter("collection", "JCMT")
+    ...     .add_filter("dataproduct_type", "image")
+    ...     .add_filter("obs_publisher_did", ["did:1", "did:2"])
+    ...     .set_order("t_exptime", "DESC")
+    ... )
+    >>> filters = SearchFilters().set_position(SkyCoord(83.8, -5.4, unit="deg"), 0.5 * u.deg)
+
+    Deliberately does not accept a ``project`` filter: no such column exists
+    yet on Argus's ``ivoa.ObsCore`` (confirmed live —
+    ``Column: [dataproduct_subtype] does not exist``, the field DaCHS used to
+    hold it), and it's still an open question where "project" would even live
+    in CAOM for SKA data. Add it once that's answered rather than guess.
+
+    All string filters match exact, ignoring case (``UPPER(col) = UPPER(...)``)
+    — narrower than :meth:`DataDiscoveryClass.query_observations`'s substring
+    (``LIKE '%...%'``) matching. That's a deliberate choice for these *new*
+    methods; it does not change ``query_observations``/``query_name`` or their
+    existing callers.
+
+    ``UPPER(col)`` *can* cost more than a plain ``col = 'value'`` comparison on
+    a TAP service backed by a real database, since it prevents the query
+    planner from using a plain index on *col* (production Argus currently
+    holds zero rows, so this never shows up there). Tested against a populated
+    Argus deployment (CADC's ``ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus``),
+    paired timing runs gave contradictory results in both directions (single
+    query pairs ranged from the ``UPPER()`` form being ~5x slower to it being
+    faster) — response-time variance on that shared, third-party service
+    turned out to be larger than whatever effect ``UPPER()`` has on its own,
+    so treat this as an untested-but-plausible optimization for a given
+    deployment, not a guaranteed speedup. Pass ``case_sensitive=True`` to
+    :meth:`add_filter` on ``dataproduct_type``, ``target_name``,
+    ``collection``, ``facility`` or ``instrument`` (the only fields
+    ``UPPER()``-wrapped by default) to opt out and get a plain
+    ``col = 'value'`` comparison instead, when you know the value in your data
+    is consistently cased (e.g. collection codes like ``"HST"``/``"JCMT"``
+    usually are) and want to rule ``UPPER()`` out as a cost on your own
+    deployment.
+
+    Filter fields (each set via ``add_filter(field, value)``)
+    ------------------------------------------------------------
+    position : ``(coordinates, radius)`` tuple, or use :meth:`set_position`
+        Cone search — ``coordinates`` an `~astropy.coordinates.SkyCoord`,
+        ``radius`` an `~astropy.units.Quantity`, e.g. ``0.5 * u.deg``.
+        Matches every observation whose footprint (``s_region``) overlaps
+        the circle (``INTERSECTS``).
+    obs_publisher_did : list of str
+        Exact-match publisher DIDs (``IN (...)``). An empty list matches
+        nothing.
+    dataproduct_type : str
+        ``""`` = match a blank/NULL ``dataproduct_type``; never set = no
+        filter; anything else = exact match, ignoring case.
+    target_name : str
+        Exact match, ignoring case.
+    collection : str
+        Exact match on ``obs_collection``, ignoring case.
+    facility : str
+        Exact match on ``facility_name``, ignoring case.
+    instrument : str
+        Exact match on ``instrument_name``, ignoring case.
+    namespace : str
+        Rucio DID namespace, matched as a prefix on ``obs_id``
+        (``obs_id LIKE 'namespace:%'``, with ``%``, ``_`` and ``\\`` in the
+        value matched literally) — the same convention-dependent split
+        the Gateway itself relies on today, not a real Argus column. Nothing
+        in the ObsCore standard requires ``obs_id`` to encode this.
+    filename : str
+        Rucio DID filename, matched as a suffix on ``obs_id``
+        (``obs_id LIKE '%:filename'``, value matched literally) — same caveat
+        as *namespace*.
+    """
+
+    #: Fields settable via :meth:`add_filter`. ``"position"`` takes a
+    #: ``(coordinates, radius)`` tuple; every other one takes a plain value.
+    FIELDS = frozenset({
+        "position", "obs_publisher_did", "dataproduct_type", "target_name",
+        "collection", "facility", "instrument", "namespace", "filename",
+    })
+
+    #: The only fields ``UPPER()``-wrapped by default (i.e. the only ones
+    #: ``case_sensitive`` on :meth:`add_filter` has any effect on).
+    #: ``obs_publisher_did`` (``IN (...)``) and ``namespace``/``filename``
+    #: (``LIKE``, no ``UPPER()``) are already case-sensitive; ``position``
+    #: isn't a string comparison at all.
+    CASE_INSENSITIVE_FIELDS = frozenset({
+        "dataproduct_type", "target_name", "collection", "facility", "instrument",
+    })
+
+    def __init__(self) -> None:
+        self._position: Optional[Tuple[SkyCoord, u.Quantity]] = None
+        self._obs_publisher_did: Optional[List[str]] = None
+        self._values: Dict[str, str] = {}
+        self._case_sensitive: Dict[str, bool] = {}
+        self._order: Optional[Tuple[str, str]] = None
+
+    def add_filter(self, field: str, value, *, case_sensitive: bool = False) -> "SearchFilters":
+        """
+        Set one filter. Returns *self*, so calls chain.
+
+        Parameters
+        ----------
+        field : str
+            One of :attr:`FIELDS` — see the class docstring for what each
+            one matches.
+        value :
+            ``(coordinates, radius)`` for ``"position"``; a list of str for
+            ``"obs_publisher_did"``; a plain str for everything else.
+        case_sensitive : bool, optional
+            Only meaningful for :attr:`CASE_INSENSITIVE_FIELDS` (``dataproduct_type``,
+            ``target_name``, ``collection``, ``facility``, ``instrument``), which
+            default to a case-insensitive ``UPPER(col) = UPPER('value')`` match.
+            Pass ``True`` to get a plain ``col = 'value'`` comparison instead,
+            which may be faster on a TAP service backed by a real database
+            (``UPPER(col)`` can prevent using a plain index on *col* — see the
+            class docstring for what live testing against a populated Argus
+            deployment did and didn't confirm about this), at the cost of no
+            longer matching a differently-cased value.
+
+        Raises
+        ------
+        ValueError
+            If *field* isn't one of :attr:`FIELDS` — deliberately strict:
+            a builder that silently no-ops on a typo'd field name (``"colection"``
+            for ``"collection"``) would produce a query that quietly matches
+            more than intended, which is worse than failing loudly. Also raised
+            if ``case_sensitive`` is passed for a field it has no effect on —
+            it's not a filter in its own right, so silently accepting it there
+            would misleadingly suggest it did something.
+        """
+        if case_sensitive and field not in self.CASE_INSENSITIVE_FIELDS:
+            raise ValueError(
+                f"case_sensitive only applies to {', '.join(sorted(self.CASE_INSENSITIVE_FIELDS))}; "
+                f"{field!r} has no case-insensitive default to opt out of"
+            )
+        if field == "position":
+            coordinates, radius = value
+            self._position = (coordinates, radius)
+        elif field == "obs_publisher_did":
+            self._obs_publisher_did = list(value)
+        elif field in self.FIELDS:
+            self._values[field] = value
+            if field in self.CASE_INSENSITIVE_FIELDS:
+                self._case_sensitive[field] = case_sensitive
+        else:
+            raise ValueError(f"unknown filter field {field!r}; valid fields: {', '.join(sorted(self.FIELDS))}")
+        return self
+
+    def is_case_sensitive(self, field: str) -> bool:
+        """Whether *field* was last set with ``case_sensitive=True``. Only
+        meaningful for :attr:`CASE_INSENSITIVE_FIELDS`; ``False`` for anything
+        else (including a field that was never set)."""
+        return self._case_sensitive.get(field, False)
+
+    def set_position(self, coordinates: SkyCoord, radius: u.Quantity) -> "SearchFilters":
+        """Convenience for ``add_filter("position", (coordinates, radius))``. Returns *self*."""
+        return self.add_filter("position", (coordinates, radius))
+
+    def set_order(self, field: str, direction: str = "ASC") -> "SearchFilters":
+        """
+        Order results by *field* instead of the default ``obs_publisher_did``.
+        Returns *self*, so this chains with :meth:`add_filter` too.
+
+        Combinable with :meth:`DataDiscoveryClass.search`'s keyset pagination:
+        confirmed live against Argus that the tie-breaking form this needs —
+        ``field > :v OR (field = :v AND obs_publisher_did > :did)`` — works,
+        even though the more compact row-value form
+        (``(field, obs_publisher_did) > (:v, :did)``) does not (rejected as
+        an ADQL syntax error). ``obs_publisher_did`` is always added as a
+        secondary sort key, so ordering stays deterministic even when *field*
+        has duplicate values across rows.
+
+        Parameters
+        ----------
+        field : str
+            Any real ``ivoa.ObsCore`` column name.
+        direction : str, optional
+            ``"ASC"`` (default) or ``"DESC"``.
+
+        Raises
+        ------
+        ValueError
+            If *field* isn't a real ``ivoa.ObsCore`` column, or *direction*
+            isn't ``"ASC"``/``"DESC"``.
+        """
+        direction = direction.upper()
+        if direction not in ("ASC", "DESC"):
+            raise ValueError(f"direction must be 'ASC' or 'DESC', got {direction!r}")
+        if field not in _OBSCORE_COLUMNS:
+            raise ValueError(f"unknown ivoa.ObsCore column {field!r} for set_order")
+        self._order = (field, direction)
+        return self
+
+    # ── Read-only views used internally by _build_where/_search_adql/search() ──
+    # (kept as properties, not a public dict, so that internal code is unchanged
+    # from the dataclass-attribute version this replaces.)
+
+    @property
+    def coordinates(self) -> Optional[SkyCoord]:
+        return self._position[0] if self._position else None
+
+    @property
+    def radius(self) -> Optional[u.Quantity]:
+        return self._position[1] if self._position else None
+
+    @property
+    def obs_publisher_did(self) -> Optional[List[str]]:
+        return self._obs_publisher_did
+
+    @property
+    def dataproduct_type(self) -> Optional[str]:
+        return self._values.get("dataproduct_type")
+
+    @property
+    def target_name(self) -> Optional[str]:
+        return self._values.get("target_name")
+
+    @property
+    def collection(self) -> Optional[str]:
+        return self._values.get("collection")
+
+    @property
+    def facility(self) -> Optional[str]:
+        return self._values.get("facility")
+
+    @property
+    def instrument(self) -> Optional[str]:
+        return self._values.get("instrument")
+
+    @property
+    def namespace(self) -> Optional[str]:
+        return self._values.get("namespace")
+
+    @property
+    def filename(self) -> Optional[str]:
+        return self._values.get("filename")
+
+    @property
+    def order(self) -> Optional[Tuple[str, str]]:
+        """``(field, direction)`` set via :meth:`set_order`, or ``None``."""
+        return self._order
 
 
 # ── Client class ──────────────────────────────────────────────────────────────
@@ -129,6 +424,18 @@ class DataDiscoveryClass:
     OBS_TABLE     = "caom2.Observation"
     PLANE_TABLE   = "caom2.Plane"
     ART_TABLE     = "caom2.Artifact"
+
+    #: Default columns for :meth:`search` — the 13-column set the Gateway
+    #: selects today (MAN-827 §1/§2), minus ``dataproduct_subtype``: confirmed
+    #: live against Argus that it does not exist on ``ivoa.ObsCore``
+    #: (``validateColumnNonAlias: Column: [dataproduct_subtype] does not
+    #: exist``) — DaCHS used it to hold the project name; Argus has no
+    #: equivalent yet (see :class:`SearchFilters`).
+    DEFAULT_SEARCH_COLUMNS = (
+        "obs_publisher_did, target_name, obs_id, dataproduct_type, calib_level, "
+        "obs_collection, access_url, access_format, facility_name, "
+        "instrument_name, s_ra, s_dec"
+    )
 
     def __init__(
         self,
@@ -423,6 +730,496 @@ class DataDiscoveryClass:
             print(f"[ADQL] {adql}")
         return self.query(adql, maxrec=maxrec)
 
+    # ── Typed shortcuts (MAN-827 §6) ──────────────────────────────────────────
+    #
+    # search/count_by/explain share one filter object (SearchFilters) and one
+    # WHERE-clause builder (_build_where), so "what would this filter set
+    # match" can never drift between what search() executes and what
+    # explain() shows. Three real Argus ADQL-dialect limits, each confirmed
+    # live against the real service (not assumed from MAN-827's own
+    # description of the *current*, DaCHS-backed Gateway), shape all of this:
+    #
+    #   1. OFFSET is rejected outright ("invalid ADQL keyword: LIMIT") --
+    #      MAN-827's own page/page_size contract (TOP + OFFSET, matching what
+    #      DaCHS accepts today) does not carry over to Argus. search() uses
+    #      keyset pagination on obs_publisher_did instead (see its docstring).
+    #   2. Sub-selects in FROM are rejected outright ("sub-select not
+    #      supported in FROM clause") -- the current Gateway's own
+    #      SELECT COUNT(*) FROM (...) trick for counting a free-form query
+    #      does not work here either. count_adql() executes and measures
+    #      instead of wrapping (see its docstring).
+    #   3. DISTANCE() is rejected outright ("DISTANCE not supported"), even
+    #      for two literal points -- so a position filter can't compute
+    #      angular_separation or sort "nearest first" the way
+    #      query_region()/the current Gateway do. A position search is
+    #      ordered and paginated by obs_publisher_did like any other search
+    #      instead -- that needs no DISTANCE() (confirmed live: ~2s per page
+    #      for a cone with ~66k matches).
+
+    def _build_where(self, filters: Optional[SearchFilters]) -> List[str]:
+        """ANDed WHERE conditions for *filters* — shared by :meth:`search`,
+        :meth:`count_by` and :meth:`explain`."""
+        if filters is None:
+            return []
+        where: List[str] = []
+
+        if filters.coordinates is not None and filters.radius is not None:
+            ra = filters.coordinates.icrs.ra.deg
+            dec = filters.coordinates.icrs.dec.deg
+            r = filters.radius.to(u.deg).value
+            # s_region, not s_ra/s_dec: s_region is indexed on Argus, s_ra/s_dec
+            # are not (MAN-827 §2). INTERSECTS, not CONTAINS: CONTAINS(s_region,
+            # CIRCLE) only matches footprints lying wholly inside the circle --
+            # confirmed live against the CADC Argus mirror, a 0.05 deg circle on
+            # M31 gave 3,788 rows with CONTAINS and 66,339 with INTERSECTS.
+            # query_region() above is left on s_ra/s_dec so it keeps behaving
+            # exactly as before.
+            where.append(f"INTERSECTS(s_region, CIRCLE('ICRS', {ra}, {dec}, {r})) = 1")
+
+        if filters.obs_publisher_did is not None:
+            if filters.obs_publisher_did:
+                in_list = ", ".join(f"'{_esc(d)}'" for d in filters.obs_publisher_did)
+                where.append(f"obs_publisher_did IN ({in_list})")
+            else:
+                # An empty DID list means "none of these", not "no filter".
+                where.append("1 = 0")
+
+        if filters.dataproduct_type is not None:
+            if filters.dataproduct_type == "":
+                where.append("(dataproduct_type IS NULL OR dataproduct_type = '')")
+            else:
+                where.append(_exact_match_where(
+                    "dataproduct_type", filters.dataproduct_type,
+                    filters.is_case_sensitive("dataproduct_type"),
+                ))
+
+        if filters.target_name:
+            where.append(_exact_match_where(
+                "target_name", filters.target_name, filters.is_case_sensitive("target_name"),
+            ))
+        if filters.collection:
+            where.append(_exact_match_where(
+                "obs_collection", filters.collection, filters.is_case_sensitive("collection"),
+            ))
+        if filters.facility:
+            where.append(_exact_match_where(
+                "facility_name", filters.facility, filters.is_case_sensitive("facility"),
+            ))
+        if filters.instrument:
+            where.append(_exact_match_where(
+                "instrument_name", filters.instrument, filters.is_case_sensitive("instrument"),
+            ))
+        if filters.namespace:
+            where.append(f"obs_id LIKE '{_esc_like(filters.namespace)}:%'")
+        if filters.filename:
+            where.append(f"obs_id LIKE '%:{_esc_like(filters.filename)}'")
+
+        return where
+
+    def _select_columns(self, columns: str, filters: Optional[SearchFilters], paginating: bool) -> str:
+        """The SELECT list :meth:`search` actually uses — shared with
+        :meth:`explain` so what the latter shows always matches.
+
+        A paginated search needs the cursor back out of every page:
+        ``obs_publisher_did`` always, plus a custom
+        :meth:`~SearchFilters.set_order` field (which also keeps ``ORDER BY``
+        from sorting by a column the caller can't see). Both are appended
+        when the caller's *columns* leave them out."""
+        existing = {c.strip() for c in columns.split(",")}
+        needed = []
+        if filters is not None and filters.order is not None:
+            needed.append(filters.order[0])
+        if paginating:
+            needed.append("obs_publisher_did")
+        for field in needed:
+            if field not in existing:
+                columns = f"{columns}, {field}"
+                existing.add(field)
+        return columns
+
+    def _search_adql(
+        self,
+        filters: Optional[SearchFilters],
+        columns: str,
+        after: Optional[str],
+        top_n: Optional[int],
+    ) -> str:
+        """The ADQL both :meth:`search` and :meth:`explain` build — one
+        function, so they can never disagree with each other.
+
+        ``top_n=None`` means unbounded: no ``TOP`` clause at all (the caller
+        relies on ``maxrec`` alone, same as :meth:`query`/:meth:`execute_adql`)
+        — *after* is meaningless without a page boundary, so it's ignored in
+        that case rather than silently building a WHERE clause nothing will
+        ever page through.
+
+        No :meth:`SearchFilters.set_order` means the existing
+        ``ORDER BY obs_publisher_did ASC`` default, unchanged — position
+        searches included. A custom order adds ``obs_publisher_did`` as a
+        secondary sort key for determinism, and — when paginating (*after*
+        given, *top_n* not ``None``) — needs the cursor's *order_value* half
+        (see :func:`_decode_cursor`) to build a tie-breaking condition, since
+        ``obs_publisher_did`` alone can no longer bound "everything after this
+        row" once the primary sort is on a different, possibly-repeated field.
+        See :func:`_after_condition` for how NULL order values are handled.
+        """
+        where = self._build_where(filters)
+        order = None if filters is None else filters.order
+        paginating = top_n is not None
+
+        if order is not None:
+            field, direction = order
+            order_by = f"{field} {direction}, obs_publisher_did ASC"
+            if after and paginating:
+                order_value, did_value = _decode_cursor(after)
+                where = where + [_after_condition(field, direction, order_value, did_value)]
+        else:
+            order_by = "obs_publisher_did ASC"
+            if after and paginating:
+                where = where + [f"obs_publisher_did > '{_esc(after)}'"]
+
+        select = f"SELECT {columns}" if top_n is None else f"SELECT TOP {top_n} {columns}"
+        adql = f"{select} FROM {self.OBSCORE_TABLE}"
+        if where:
+            adql += " WHERE " + " AND ".join(where)
+        if order_by:
+            adql += f" ORDER BY {order_by}"
+        return adql
+
+    def search(
+        self,
+        filters: Optional[SearchFilters] = None,
+        *,
+        columns: Optional[str] = None,
+        after: Optional[str] = None,
+        page_size: Optional[int] = 100,
+        split_obs_id: bool = True,
+        with_total_count: bool = False,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        One shortcut covering every combination of the Gateway's filters
+        (MAN-827 §5 requirement 1) — position, collection, facility,
+        instrument, target name, data-product type, a publisher-DID list, and
+        Rucio namespace/filename, all ANDed, any subset set or none.
+
+        Pagination is keyset-based (*after* / ``obs_publisher_did``), **not**
+        the ``page``/``page_size`` OFFSET scheme MAN-827 proposes — confirmed
+        live against Argus that ``OFFSET`` is rejected outright
+        (``invalid ADQL keyword: LIMIT``), so page-N pagination the way the
+        current DaCHS-backed Gateway does it isn't possible against this
+        service today. Pass the previous call's ``table.meta["next_after"]``
+        back in as *after* to get the next page; it's ``None`` once there are
+        no more rows.
+
+        A position filter (*filters.coordinates* set) is paginated the same
+        way. It can't be sorted "nearest first" or report
+        ``angular_separation``: ``DISTANCE()`` is rejected server-side
+        (confirmed live, even for two literal points: ``DISTANCE not
+        supported``).
+
+        Pagination is opt-in, not the only mode: pass ``page_size=None`` for
+        an unbounded search — no ``TOP`` at all, just ``maxrec`` as a plain
+        safety cap (:attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC`,
+        the same default :meth:`query`/:meth:`execute_adql` use), with no
+        pagination bookkeeping at all (``next_after`` is always ``None``, and
+        *after* is ignored — there's no page boundary for it to mean anything
+        against). Reach for this when you just want everything matching the
+        filters and don't care about paging through a UI-sized page at a
+        time — the default ``page_size=100`` exists for the latter case
+        (MAN-827's own contract for this shortcut is literally "a page of
+        rows"), not because every caller needs pagination.
+
+        A custom order (:meth:`SearchFilters.set_order`) works alongside
+        keyset pagination — see that method's docstring for exactly how; the
+        cursor in ``next_after`` becomes an opaque string carrying both the
+        order field's value and the ``obs_publisher_did`` tie-breaker, still
+        just a string to pass back in as *after*.
+
+        Parameters
+        ----------
+        filters : SearchFilters, optional
+            Shared filter object — see :class:`SearchFilters`. ``None`` (the
+            default) searches everything.
+        columns : str, optional
+            ADQL column list. Defaults to :attr:`DEFAULT_SEARCH_COLUMNS`.
+            When paginating, ``obs_publisher_did`` (and any
+            :meth:`~SearchFilters.set_order` field) is appended if missing,
+            since the next-page cursor is read from it.
+        after : str, optional
+            Keyset cursor — see above. Ignored when *page_size* is ``None``.
+        page_size : int or None, optional
+            Max rows this call returns. ``None`` = unbounded (see above).
+        split_obs_id : bool, optional
+            Also add ``namespace``/``filename`` columns, split from ``obs_id``
+            on the first ``:`` — the same convention-dependent split the
+            Gateway's own code does today (MAN-827 §3 finding 3); Argus does
+            not expose these as native columns yet.
+        with_total_count : bool, optional
+            Also run a second, filter-scoped ``COUNT(*)`` (no sub-select — see
+            :meth:`count_adql`'s docstring for why that matters here) and
+            stash it in ``table.meta["total_count"]``. Off by default: MAN-827
+            itself notes the Gateway already treats counting as a separate
+            call from paging, so a slow count never blocks the first page.
+        verbose : bool, optional
+            Print the generated ADQL before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            ``table.meta["next_after"]`` is the cursor for the next page, or
+            ``None`` if this was the last one (always ``None`` when
+            *page_size* is ``None``). ``table.meta["total_count"]`` is
+            present only when *with_total_count* is true.
+
+        Examples
+        --------
+        >>> filters = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image")
+        >>> page1 = DataDiscovery.search(filters, page_size=50)
+        >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+        >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
+        """
+        unbounded = page_size is None
+        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, not unbounded)
+        order = None if filters is None else filters.order
+        # Fetch one extra row to learn whether another page exists, without a
+        # second round trip or an OFFSET this service doesn't support; trimmed
+        # back to page_size before returning. Unbounded mode has no "next
+        # page" to detect at all.
+        fetch_n = None if unbounded else page_size + 1
+        adql = self._search_adql(filters, columns, after, fetch_n)
+
+        if verbose:
+            print(f"[ADQL] {adql}")
+
+        table = self.query(adql, maxrec=fetch_n)
+
+        has_more = (not unbounded) and len(table) > page_size
+        if has_more:
+            table = table[:page_size]
+
+        if split_obs_id and "obs_id" in table.colnames:
+            _add_namespace_filename_columns(table)
+
+        if has_more and len(table) and "obs_publisher_did" in table.colnames:
+            if order is not None and order[0] in table.colnames:
+                table.meta["next_after"] = _encode_cursor(table[order[0]][-1], table["obs_publisher_did"][-1])
+            else:
+                table.meta["next_after"] = str(table["obs_publisher_did"][-1])
+        else:
+            table.meta["next_after"] = None
+
+        if with_total_count:
+            count_where = self._build_where(filters)
+            count_adql = f"SELECT COUNT(*) AS num_records FROM {self.OBSCORE_TABLE}"
+            if count_where:
+                count_adql += " WHERE " + " AND ".join(count_where)
+            count_table = self.query(count_adql, maxrec=1)
+            table.meta["total_count"] = int(count_table["num_records"][0]) if len(count_table) else 0
+
+        return table
+
+    def count_by(
+        self,
+        group_by: Optional[List[str]] = None,
+        filters: Optional[SearchFilters] = None,
+        *,
+        max_groups: int = 500,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Row counts grouped by one or more fields, for the same filter set
+        :meth:`search` accepts (MAN-827 §5 requirement 3 — the
+        search-catalogue type tabs and ADQL template 3).
+
+        Parameters
+        ----------
+        group_by : list of str, optional
+            ObsCore column names to group by. Defaults to
+            ``["dataproduct_type"]``, matching MAN-827's stated default.
+        filters : SearchFilters, optional
+            Same filter object :meth:`search` takes.
+        max_groups : int, optional
+            Most groups to return (largest first). If the result reaches this
+            limit, a warning says it may be truncated; pass a larger value to
+            get the rest.
+        verbose : bool, optional
+            Print the generated ADQL before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            One row per group (up to *max_groups*), plus ``num_records``.
+
+        Raises
+        ------
+        ValueError
+            If a *group_by* field isn't a real ``ivoa.ObsCore`` column.
+
+        Examples
+        --------
+        >>> DataDiscovery.count_by(["dataproduct_type", "facility_name"])
+        """
+        group_by = group_by or ["dataproduct_type"]
+        unknown = [field for field in group_by if field not in _OBSCORE_COLUMNS]
+        if unknown:
+            raise ValueError(f"unknown ivoa.ObsCore column(s) for count_by: {', '.join(map(repr, unknown))}")
+        cols = ", ".join(group_by)
+        where = self._build_where(filters)
+
+        adql = f"SELECT {cols}, COUNT(*) AS num_records FROM {self.OBSCORE_TABLE}"
+        if where:
+            adql += " WHERE " + " AND ".join(where)
+        adql += f" GROUP BY {cols} ORDER BY num_records DESC"
+
+        if verbose:
+            print(f"[ADQL] {adql}")
+        table = self.query(adql, maxrec=max_groups)
+        if len(table) >= max_groups:
+            warnings.warn(
+                f"count_by returned {len(table)} groups, the max_groups limit; there may be more. "
+                "Pass a larger max_groups to get them."
+            )
+        return table
+
+    def explain(
+        self,
+        filters: Optional[SearchFilters] = None,
+        *,
+        columns: Optional[str] = None,
+        after: Optional[str] = None,
+        page_size: Optional[int] = 100,
+    ) -> str:
+        """
+        Return the ADQL :meth:`search` would run for *filters*, without
+        executing it (MAN-827 §5 requirement 5 — the "show query" modal).
+
+        Built through the exact same :meth:`_search_adql` helper
+        :meth:`search` uses, so this can never drift out of sync with what
+        ``search(filters)`` actually does. The one difference: for a
+        keyset-paginated search this shows ``TOP page_size``,
+        not the ``page_size + 1`` :meth:`search` fetches internally to detect
+        whether another page exists — that's an implementation detail of
+        pagination, not something a user editing this ADQL in a "show query"
+        modal should see. Pass ``page_size=None`` to see the unbounded form
+        (no ``TOP`` at all) that ``search(filters, page_size=None)`` runs.
+
+        Parameters
+        ----------
+        filters : SearchFilters, optional
+            Same filter object :meth:`search` takes.
+        columns : str, optional
+            Same as :meth:`search`.
+        after : str, optional
+            Same as :meth:`search`.
+        page_size : int or None, optional
+            Same as :meth:`search` — shown here as the real ``TOP`` value
+            (or no ``TOP`` at all when ``None``).
+
+        Returns
+        -------
+        str
+
+        Examples
+        --------
+        >>> DataDiscovery.explain(SearchFilters().add_filter("collection", "JCMT"))
+        "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did ASC"
+        """
+        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, page_size is not None)
+        return self._search_adql(filters, columns, after, page_size)
+
+    def execute_adql(
+        self,
+        adql: str,
+        *,
+        max_rows: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Run free-form ADQL (MAN-827's Q5 / the ADQL tab), capped at
+        *max_rows*.
+
+        No ``page``/``page_size`` OFFSET parameter: confirmed live against
+        Argus that ``OFFSET`` is rejected outright (``invalid ADQL keyword:
+        LIMIT``), so page-N pagination over arbitrary free-form ADQL isn't
+        possible against this service today — and unlike :meth:`search`,
+        there's no ``obs_publisher_did``-style keyset fallback available
+        here either, because an arbitrary caller-supplied query has no
+        column astroquery can assume is present, sortable, or unique.
+
+        Parameters
+        ----------
+        adql : str
+            ADQL query string. If it already has its own ``TOP``, that wins;
+            *max_rows* only caps rows via ``maxrec`` on top of whatever the
+            query itself returns.
+        max_rows : int, optional
+            Row cap, via TAP's own ``maxrec``. Defaults to
+            :attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC` (same
+            default :meth:`query` uses).
+        verbose : bool, optional
+            Print *adql* before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+
+        Examples
+        --------
+        >>> DataDiscovery.execute_adql("SELECT TOP 10 * FROM ivoa.ObsCore", max_rows=10)
+        """
+        if verbose:
+            print(f"[ADQL] {adql}")
+        return self.query(adql, maxrec=max_rows)
+
+    def count_adql(
+        self,
+        adql: str,
+        *,
+        max_rows: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Row count for a free-form ADQL query (MAN-827's Q3 / the ADQL tab's
+        total), capped at *max_rows* — matching MAN-827's own stated
+        semantics for this query type ("One row: num_records, capped at the
+        query's TOP"), not an unbounded ``COUNT(*)``.
+
+        Deliberately does **not** wrap *adql* in ``SELECT COUNT(*) FROM
+        (...)``, the way the current DaCHS-backed Gateway does this today:
+        confirmed live against Argus that sub-selects in the ``FROM`` clause
+        are rejected outright (``sub-select not supported in FROM clause``).
+        Rewriting an arbitrary caller's ``SELECT`` clause via string surgery
+        to work around that would reintroduce exactly the ADQL-built-by-
+        string-interpolation risk MAN-827 itself calls out (§4) — and would
+        still silently give the wrong answer for any query with its own
+        ``GROUP BY``, where ``COUNT(*)`` over the original column list
+        doesn't mean "how many result rows". Executing the query and
+        measuring the real row count sidesteps both problems, and is exactly
+        the "capped at TOP" semantics MAN-827 describes — just arrived at by
+        running the query instead of wrapping it.
+
+        Parameters
+        ----------
+        adql : str
+            ADQL query string.
+        max_rows : int, optional
+            Row cap passed to :meth:`execute_adql`.
+        verbose : bool, optional
+            Print *adql* before executing.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            One row: ``num_records``.
+
+        Examples
+        --------
+        >>> DataDiscovery.count_adql("SELECT * FROM ivoa.ObsCore WHERE dataproduct_type = 'image'")
+        """
+        table = self.execute_adql(adql, max_rows=max_rows, verbose=verbose)
+        return Table(rows=[{"num_records": len(table)}])
+
     def get_artifacts(self, observation_id: str) -> Table:
         """
         Return all file artifacts associated with an observation.
@@ -685,6 +1482,121 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
 def _esc(s: str) -> str:
     """Minimal ADQL string-literal escaping."""
     return s.replace("'", "''")
+
+
+def _esc_like(s: str) -> str:
+    """Escape *s* for use inside an ADQL ``LIKE`` pattern, so ``%``, ``_`` and
+    ``\\`` in it match literally. ADQL 2.0 has no ``ESCAPE`` clause (Argus
+    accepts one but ignores it); Argus is PostgreSQL-backed, where backslash
+    is the default ``LIKE`` escape -- confirmed live against the CADC Argus
+    mirror: ``'dao\\_c182%'`` matches ``dao_c182...`` but not ``daoXc182...``."""
+    return _esc(s).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _exact_match_where(column: str, value: str, case_sensitive: bool) -> str:
+    """``column = 'value'`` (case-sensitive) or ``UPPER(column) = UPPER('value')``
+    (default) — the latter can cost more against a TAP service backed by a
+    real database, since ``UPPER(col)`` can't use a plain index on *col*, but
+    see :class:`SearchFilters` for what live testing did and didn't confirm
+    about this."""
+    if case_sensitive:
+        return f"{column} = '{_esc(value)}'"
+    return f"UPPER({column}) = UPPER('{_esc(value)}')"
+
+
+def _sql_literal(value) -> str:
+    """ADQL literal for *value* -- quoted only if it's actually a string.
+    Used for the custom-order keyset tie-break in :meth:`DataDiscoveryClass._search_adql`,
+    where the column's real type (numeric vs char) has to be respected or the
+    comparison is either a syntax error or silently wrong."""
+    if isinstance(value, str):
+        return f"'{_esc(value)}'"
+    return repr(float(value))
+
+
+#: Separator for the composite (order_value, obs_publisher_did) cursor a
+#: custom-ordered search() page needs -- U+001F (unit separator), chosen
+#: because it can't appear in a DID or a real column value typed at a keyboard.
+_CURSOR_SEP = "\x1f"
+
+
+def _encode_cursor(order_value, did_value) -> str:
+    """Opaque keyset cursor carrying both a custom order field's last value
+    and the obs_publisher_did tie-breaker -- needed once :meth:`SearchFilters.set_order`
+    is in play, since obs_publisher_did alone no longer determines row order.
+    The plain (no custom order) case still uses a bare obs_publisher_did
+    string as its cursor, unchanged -- this encoding is only used when there's
+    a second value to carry."""
+    if _is_null(order_value):
+        return f"z{_CURSOR_SEP}{_CURSOR_SEP}{did_value}"
+    tag = "s" if isinstance(order_value, str) else "n"
+    return f"{tag}{_CURSOR_SEP}{order_value}{_CURSOR_SEP}{did_value}"
+
+
+def _decode_cursor(cursor: str) -> Tuple[object, str]:
+    """Inverse of :func:`_encode_cursor` -- returns ``(order_value, did_value)``,
+    with ``order_value`` ``None`` for a NULL."""
+    tag, order_repr, did_value = cursor.split(_CURSOR_SEP, 2)
+    if tag == "z":
+        return None, did_value
+    order_value = order_repr if tag == "s" else float(order_repr)
+    return order_value, did_value
+
+
+def _is_null(value) -> bool:
+    """Whether a table cell read back from a TAP result is NULL (masked, None
+    or a float NaN)."""
+    if value is None or value is np.ma.masked:
+        return True
+    try:
+        return bool(np.isnan(value))
+    except TypeError:
+        return False
+
+
+def _after_condition(field: str, direction: str, order_value, did_value: str) -> str:
+    """Keyset condition selecting the rows after ``(order_value, did_value)``
+    in ``ORDER BY field direction, obs_publisher_did ASC``.
+
+    NULLs follow the server's ordering, which Argus (PostgreSQL) puts last for
+    ``ASC`` and first for ``DESC`` -- confirmed live against the CADC Argus
+    mirror. So after a non-NULL value, ``ASC`` must still include the NULL
+    rows still to come; after a NULL (``order_value is None``), ``DESC`` must
+    include every non-NULL row, which all come later."""
+    did = f"'{_esc(did_value)}'"
+    if order_value is None:
+        nulls_after = f"({field} IS NULL AND obs_publisher_did > {did})"
+        if direction == "ASC":
+            return nulls_after
+        return f"({nulls_after} OR {field} IS NOT NULL)"
+    cmp_op = ">" if direction == "ASC" else "<"
+    literal = _sql_literal(order_value)
+    condition = f"{field} {cmp_op} {literal} OR ({field} = {literal} AND obs_publisher_did > {did})"
+    if direction == "ASC":
+        condition += f" OR {field} IS NULL"
+    return f"({condition})"
+
+
+def _add_namespace_filename_columns(table: Table) -> None:
+    """Best-effort split of ``obs_id`` into ``namespace``/``filename`` columns,
+    in place — mirrors the Gateway's own ``extract_filenames_and_namespaces``
+    fallback (MAN-827 §3 finding 3: nothing in the ObsCore standard requires
+    ``obs_id`` to encode ``namespace:filename``; this is only as reliable as
+    that convention holds for a given row). A row with no ``:`` gets an empty
+    ``namespace`` and the whole ``obs_id`` as ``filename``, same as the
+    Gateway's own fallback for a missing separator.
+    """
+    namespaces, filenames = [], []
+    for obs_id in table["obs_id"]:
+        text = str(obs_id)
+        if ":" in text:
+            ns, _, fn = text.partition(":")
+        else:
+            ns, fn = "", text
+        namespaces.append(ns)
+        filenames.append(fn)
+    table["namespace"] = namespaces
+    table["filename"] = filenames
 
 
 _TABLE_RE = re.compile(r'\b([a-zA-Z_]\w*\.[a-zA-Z_]\w*)\b')

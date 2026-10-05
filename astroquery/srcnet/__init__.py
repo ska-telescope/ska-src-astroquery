@@ -102,7 +102,7 @@ def _env_urls():
 from .core import SRCNet, SRCNetClass
 from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
 from .software_discovery import SoftwareDiscovery, SoftwareDiscoveryClass
-from .data_discovery import DataDiscovery, DataDiscoveryClass
+from .data_discovery import DataDiscovery, DataDiscoveryClass, SearchFilters
 from .data_access import DataAccessClass
 from .chat import SRCNetChat
 
@@ -115,7 +115,7 @@ __all__ = [
     'conf', 'ENVIRONMENTS',
     'SKAFormatFactory', 'Cube', 'Image', 'Spectra', 'Visibility',
     'SoftwareDiscovery', 'SoftwareDiscoveryClass',
-    'DataDiscovery', 'DataDiscoveryClass',
+    'DataDiscovery', 'DataDiscoveryClass', 'SearchFilters',
     'DataAccess', 'DataAccessClass',
     'SRCNetChat',
 ]
