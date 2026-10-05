@@ -657,14 +657,17 @@ specific page means walking forward one page at a time until you reach it:
 .. code-block:: python
 
     >>> def get_page(filters, n, page_size=50):
-    ...     """Walk forward to page n (1-indexed) via the keyset cursor."""
+    ...     """Walk forward to page n (1-indexed) via the keyset cursor.
+    ...
+    ...     Returns None if there are fewer than n pages, rather than a wrong page."""
     ...     after = None
-    ...     for _ in range(n):
+    ...     for i in range(1, n + 1):
     ...         page = DataDiscovery.search(filters, page_size=page_size, after=after)
+    ...         if i == n:
+    ...             return page
     ...         after = page.meta["next_after"]
     ...         if after is None:
-    ...             break  # ran out of rows before reaching page n
-    ...     return page
+    ...             return None  # only i pages exist
 
     >>> page3 = get_page(filters, 3, page_size=50)
 
