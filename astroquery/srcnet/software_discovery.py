@@ -45,7 +45,9 @@ from urllib.parse import urlparse, urlunparse
 
 import pyvo
 import requests
+from astropy.io.votable import parse_single_table
 from astropy.table import Table
+from io import BytesIO
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -178,7 +180,27 @@ class SoftwareDiscoveryClass:
         """
         from . import conf
         maxrec = maxrec if maxrec is not None else conf.SRCNET_DEFAULT_MAXREC
-        return self.tap.search(adql, maxrec=maxrec).to_table()
+        try:
+            return self.tap.search(adql, maxrec=maxrec).to_table()
+        except Exception:
+            # Workaround for TAP backends that emit invalid
+            # ``datatype="varchar"`` (not a valid VOTable type).
+            url = f"{self._tap_url.rstrip('/')}/sync"
+            resp = requests.get(
+                url,
+                params={
+                    "request": "doQuery",
+                    "query": adql,
+                    "LANG": "ADQL",
+                    "maxrec": maxrec,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            xml = resp.text
+            xml = xml.replace('datatype="varchar"', 'datatype="char" arraysize="*"')
+            votable = parse_single_table(BytesIO(xml.encode()))
+            return votable.to_table()
 
     # ── Schema introspection ──────────────────────────────────────────────────
 

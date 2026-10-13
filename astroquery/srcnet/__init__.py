@@ -27,6 +27,16 @@ ENVIRONMENTS = {
         "software_tap":    "https://software-discovery.ral-preprod.uksrc.org/tap/",
         "chat":            "https://chat.srcdev.skao.int",
     },
+    "dev": {
+        # ska-src-api-deployment-stack local dev environment (minikube/kind).
+        "authn_api":       "https://aapi.test/api/v1",
+        "dm_api":          "https://dmapi.test/api/v1",
+        "tap":             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/argus",
+        "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
+        "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
+        "software_tap":    "https://sdapi.test/tap/",
+        "chat":            "https://chat.srcdev.skao.int",
+    },
     "local": {
         # Services run locally for development, including authentication: authn_api
         # points at the dev mock IAM from the ska-src-software-registration
@@ -56,6 +66,7 @@ class Conf(_config.ConfigNamespace):
         'SRCNet deployment environment. '
         '"production" (default) — live SRCNet services. '
         '"preprod" — pre-production / staging services. '
+        '"dev" — ska-src-api-deployment-stack local dev environment. '
         '"local" — services on localhost, authenticated against the dev IAM. '
         'All service URLs are derived from this setting.'
     )
