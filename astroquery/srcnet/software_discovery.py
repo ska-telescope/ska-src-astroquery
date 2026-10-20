@@ -45,7 +45,11 @@ from urllib.parse import urlparse, urlunparse
 
 import pyvo
 import requests
+from pyvo.dal import DALFormatError
+from pyvo.dal.tap import TAPResults
+from astropy.io.votable import parse
 from astropy.table import Table
+from io import BytesIO
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -178,7 +182,39 @@ class SoftwareDiscoveryClass:
         """
         from . import conf
         maxrec = maxrec if maxrec is not None else conf.SRCNET_DEFAULT_MAXREC
-        return self.tap.search(adql, maxrec=maxrec).to_table()
+        try:
+            return self.tap.search(adql, maxrec=maxrec).to_table()
+        except DALFormatError as exc:
+            if "varchar" not in str(exc):
+                raise
+        return self._query_repairing_varchar(adql, maxrec)
+
+    def _query_repairing_varchar(self, adql: str, maxrec: int) -> Table:
+        """Re-run *adql* and repair ``datatype="varchar"`` before parsing.
+
+        Workaround for TAP backends that emit ``varchar``, which is not a valid
+        VOTable datatype. The request goes through the TAP session, so it keeps
+        the auth header, redirect fix and retries; the repaired VOTable is wrapped
+        in `~pyvo.dal.tap.TAPResults` so QUERY_STATUS errors still raise and an
+        overflow still warns.
+        """
+        url = f"{self._tap_url.rstrip('/')}/sync"
+        session = self.tap._session
+        resp = session.get(
+            url,
+            params={
+                "request": "doQuery",
+                "query": adql,
+                "LANG": "ADQL",
+                "maxrec": maxrec,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        votable = parse(BytesIO(_repair_varchar(resp.text).encode()))
+        results = TAPResults(votable, url=url, session=session)
+        results.check_overflow_warning(maxrec)
+        return results.to_table()
 
     # ── Schema introspection ──────────────────────────────────────────────────
 
@@ -592,6 +628,24 @@ def _parse_tableset(content: bytes) -> list:
         if name:
             rows.append({"name": name, "description": desc})
     return rows
+
+
+_VARCHAR_TAG = re.compile(r"""<(?:\w+:)?(?:FIELD|PARAM)\b[^>]*\bdatatype=(["'])varchar\1[^>]*>""")
+
+
+def _repair_varchar(xml: str) -> str:
+    """Rewrite ``datatype="varchar"`` FIELD/PARAM tags as ``char``.
+
+    ``arraysize="*"`` is added only when the tag has no ``arraysize`` already,
+    so an existing size is kept and no attribute is duplicated.
+    """
+    def fix(match: re.Match) -> str:
+        tag = re.sub(r"""\bdatatype=(["'])varchar\1""", 'datatype="char"', match.group(0))
+        if not re.search(r"\barraysize=", tag):
+            tag = tag.replace('datatype="char"', 'datatype="char" arraysize="*"', 1)
+        return tag
+
+    return _VARCHAR_TAG.sub(fix, xml)
 
 
 def _mount_retries(session: requests.Session) -> None:

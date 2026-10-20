@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 from astropy.table import Table
+from pyvo.dal import DALFormatError, DALOverflowWarning, DALQueryError
 
 from astroquery.srcnet.software_discovery import (
     SoftwareDiscoveryClass,
@@ -23,6 +24,7 @@ from astroquery.srcnet.software_discovery import (
     _mount_retries,
     _parse_tableset,
     _patch_redirect_session,
+    _repair_varchar,
 )
 
 
@@ -215,6 +217,98 @@ class TestSoftwareDiscoveryQuery:
         sd.query(adql)
         sd._tap.search.assert_called_once()
         assert sd._tap.search.call_args[0][0] == adql
+
+
+def _votable(status="OK", field='<FIELD name="uri" datatype="varchar"/>', trailer=""):
+    """A minimal TAP result VOTable; ``varchar`` makes pyvo reject it."""
+    return (
+        '<?xml version="1.0"?>'
+        '<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">'
+        f'<RESOURCE type="results"><INFO name="QUERY_STATUS" value="{status}"/>'
+        f"<TABLE>{field}<DATA><TABLEDATA><TR><TD>ska:foo:1.0</TD></TR></TABLEDATA></DATA></TABLE>"
+        f"{trailer}</RESOURCE></VOTABLE>"
+    )
+
+
+@pytest.fixture
+def sd_varchar():
+    """SoftwareDiscoveryClass (with a token) whose TAP search hits a varchar VOTable.
+
+    Returns ``(obj, session_get)``; set ``session_get.return_value.text`` to the
+    VOTable the fallback request receives.
+    """
+    obj = SoftwareDiscoveryClass(tap_url="http://mock-tap/", token="tok")
+    tap = obj.tap
+    err = DALFormatError("E06: Unknown datatype 'varchar' on field 'uri'")
+    with patch.object(tap, "search", side_effect=err), patch.object(tap._session, "get") as get:
+        get.return_value.text = _votable()
+        yield obj, get
+
+
+class TestQueryVarcharFallback:
+    """query() — repair of TAP results with the invalid ``varchar`` datatype."""
+
+    def test_repairs_varchar_and_returns_table(self, sd_varchar):
+        obj, _ = sd_varchar
+        t = obj.query("SELECT uri FROM sdm.software")
+        assert isinstance(t, Table)
+        assert list(t["uri"]) == ["ska:foo:1.0"]
+
+    def test_retry_uses_authenticated_tap_session(self, sd_varchar):
+        obj, get = sd_varchar
+        obj.query("SELECT uri FROM sdm.software", maxrec=5)
+        assert obj.tap._session.headers["Authorization"] == "Bearer tok"
+        url = get.call_args[0][0]
+        params = get.call_args[1]["params"]
+        assert url == "http://mock-tap/sync"
+        assert params["query"] == "SELECT uri FROM sdm.software"
+        assert params["maxrec"] == 5
+
+    def test_keeps_existing_arraysize(self, sd_varchar):
+        obj, get = sd_varchar
+        get.return_value.text = _votable(field='<FIELD name="uri" datatype="varchar" arraysize="32"/>')
+        assert list(obj.query("SELECT uri FROM sdm.software")["uri"]) == ["ska:foo:1.0"]
+
+    def test_query_status_error_raises(self, sd_varchar):
+        obj, get = sd_varchar
+        get.return_value.text = _votable(status="ERROR")
+        with pytest.raises(DALQueryError):
+            obj.query("SELECT uri FROM sdm.software")
+
+    def test_overflow_below_maxrec_warns(self, sd_varchar):
+        """Server truncated below the requested maxrec — warn, as pyvo does."""
+        obj, get = sd_varchar
+        get.return_value.text = _votable(trailer='<INFO name="QUERY_STATUS" value="OVERFLOW"/>')
+        with pytest.warns(DALOverflowWarning):
+            obj.query("SELECT uri FROM sdm.software", maxrec=5)
+
+    def test_other_format_errors_are_not_retried(self, sd_varchar):
+        obj, get = sd_varchar
+        obj.tap.search.side_effect = DALFormatError("response table missing column descriptions.")
+        with pytest.raises(DALFormatError):
+            obj.query("SELECT uri FROM sdm.software")
+        get.assert_not_called()
+
+
+class TestRepairVarchar:
+    """_repair_varchar() — rewrite only the varchar datatype, never duplicate attributes."""
+
+    def test_adds_arraysize_when_missing(self):
+        assert _repair_varchar('<FIELD name="a" datatype="varchar"/>') == (
+            '<FIELD name="a" datatype="char" arraysize="*"/>'
+        )
+
+    def test_keeps_existing_arraysize(self):
+        assert _repair_varchar('<FIELD name="a" datatype="varchar" arraysize="32"/>') == (
+            '<FIELD name="a" datatype="char" arraysize="32"/>'
+        )
+        assert _repair_varchar('<PARAM arraysize="8" datatype="varchar" value="x"/>') == (
+            '<PARAM arraysize="8" datatype="char" value="x"/>'
+        )
+
+    def test_leaves_other_fields_alone(self):
+        xml = '<FIELD name="n" datatype="int"/><FIELD name="s" datatype="char" arraysize="*"/>'
+        assert _repair_varchar(xml) == xml
 
 
 class TestQuerySoftware:
