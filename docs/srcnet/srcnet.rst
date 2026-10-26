@@ -580,7 +580,8 @@ keyword, and all three methods interpret it identically, unlike
 ``query_region``/``query_name``/``query_observations`` above, which each take
 their own separate keyword arguments and can't be combined in one call.
 Available fields: ``position`` (a ``(coordinates, radius)`` tuple — or use the
-``set_position(coordinates, radius)`` convenience wrapper), ``obs_publisher_did``
+``set_position(coordinates, radius)`` convenience wrapper), ``obs_id`` (exact
+match: one observation's data products), ``obs_publisher_did``
 (list, exact match), ``dataproduct_type``, ``target_name``, ``collection``,
 ``facility``, ``instrument`` (all exact match, ignoring case — narrower than
 ``query_observations``'s substring matching), and ``namespace``/``filename``
@@ -740,16 +741,37 @@ without executing it — useful for a "show me the query" step before running it
     >>> print(DataDiscovery.explain(filters))
     SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') AND ...
 
-get_artifacts
-^^^^^^^^^^^^^
+Observations, data products and files
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Return all file artifacts (URIs, product types, and sizes) associated with a
-given observation ID.
+Each ``ivoa.ObsCore`` row is one data product: ``obs_id`` identifies its
+observation and ``obs_publisher_did`` the product. In CAOM2 a product is a
+``caom2.Plane`` and its files are ``caom2.Artifact`` rows. To go from an
+observation to its products and files:
 
 .. code-block:: python
 
-    >>> t = DataDiscovery.get_artifacts("scuba2_00001_20230101T000000")
-    >>> t["uri", "productType", "contentLength"]
+    >>> from astroquery.srcnet import DataDiscovery, SearchFilters
+
+    >>> # Observations, with how many data products each has
+    >>> observations = DataDiscovery.count_by(["obs_id", "target_name"],
+    ...                                       SearchFilters().add_filter("collection", "sv"))
+
+    >>> # The data products of one observation (paged like any search)
+    >>> obs_id = str(observations["obs_id"][0])
+    >>> products = DataDiscovery.search(SearchFilters().add_filter("obs_id", obs_id))
+
+    >>> # One row per product with its file count and total size
+    >>> DataDiscovery.get_product_summary(obs_id)
+
+    >>> # The files of one product
+    >>> files = DataDiscovery.get_files(str(products["obs_publisher_did"][0]))
+    >>> files["uri", "contentType", "contentLength"]
+
+``get_artifacts(obs_id)`` returns the files of all an observation's products at
+once, with an ``obs_publisher_did`` column saying which product each belongs
+to. ``get_files`` and ``get_artifacts`` cap the rows at ``max_rows`` (default
+``conf.SRCNET_DEFAULT_MAXREC``) and warn when the cap is reached.
 
 query (raw ADQL)
 ^^^^^^^^^^^^^^^^

@@ -204,6 +204,9 @@ class SearchFilters:
         ``radius`` an `~astropy.units.Quantity`, e.g. ``0.5 * u.deg``.
         Matches every observation whose footprint (``s_region``) overlaps
         the circle (``INTERSECTS``).
+    obs_id : str
+        Exact match on ``obs_id``: every data product of one observation
+        (as returned in the ``obs_id`` column of any search).
     obs_publisher_did : list of str
         Exact-match publisher DIDs (``IN (...)``). An empty list matches
         nothing.
@@ -233,7 +236,7 @@ class SearchFilters:
     #: Fields settable via :meth:`add_filter`. ``"position"`` takes a
     #: ``(coordinates, radius)`` tuple; every other one takes a plain value.
     FIELDS = frozenset({
-        "position", "obs_publisher_did", "dataproduct_type", "target_name",
+        "position", "obs_id", "obs_publisher_did", "dataproduct_type", "target_name",
         "collection", "facility", "instrument", "namespace", "filename",
     })
 
@@ -425,6 +428,10 @@ class SearchFilters:
     @property
     def radius(self) -> Optional[u.Quantity]:
         return self._position[1] if self._position else None
+
+    @property
+    def obs_id(self) -> Optional[str]:
+        return self._values.get("obs_id")
 
     @property
     def obs_publisher_did(self) -> Optional[List[str]]:
@@ -846,6 +853,9 @@ class DataDiscoveryClass:
             # query_region() above is left on s_ra/s_dec so it keeps behaving
             # exactly as before.
             where.append(f"INTERSECTS(s_region, CIRCLE('ICRS', {ra}, {dec}, {r})) = 1")
+
+        if filters.obs_id is not None:
+            where.append(f"obs_id = '{_esc(filters.obs_id)}'")
 
         if filters.obs_publisher_did is not None:
             if filters.obs_publisher_did:
@@ -1315,13 +1325,81 @@ class DataDiscoveryClass:
         table = self.execute_adql(adql, max_rows=max_rows, verbose=verbose)
         return Table(rows=[{"num_records": len(table)}])
 
-    def get_artifacts(self, observation_id: str) -> Table:
+    # ── Observation → data products → files ──────────────────────────────────
+    #
+    # ObsCore has one row per data product: obs_id identifies the observation
+    # and obs_publisher_did the product. In CAOM2 a product is a Plane
+    # (Plane.publisherID = obs_publisher_did) and its files are Artifacts
+    # (Artifact.planeID = Plane.planeID). These methods resolve products through
+    # ObsCore first, so they work on CAOM 2.4 and 2.5 Argus deployments alike.
+
+    def _product_dids(self, observation_id: str) -> List[str]:
+        """The ``obs_publisher_did`` of every data product of an observation."""
+        rows = self.query(
+            f"SELECT obs_publisher_did FROM {self.OBSCORE_TABLE} "
+            f"WHERE obs_id = '{_esc(observation_id)}'"
+        )
+        return [str(r["obs_publisher_did"]) for r in rows]
+
+    def _capped_query(self, adql: str, max_rows: Optional[int], what: str) -> Table:
+        """Run *adql* with a row cap, warning when the cap is reached."""
+        from . import conf
+        cap = max_rows if max_rows is not None else conf.SRCNET_DEFAULT_MAXREC
+        table = self.query(adql, maxrec=cap)
+        if len(table) >= cap:
+            warnings.warn(
+                f"{what} returned {len(table)} rows, the max_rows limit; there may be more. "
+                "Pass a larger max_rows to get them."
+            )
+        return table
+
+    def get_artifacts(self, observation_id: str, *, max_rows: Optional[int] = None) -> Table:
         """
-        Return all file artifacts associated with an observation.
+        Return all file artifacts of an observation, across its data products.
 
         Uses a two-step lookup: first resolves ``obs_publisher_did`` values from
         ``ivoa.ObsCore`` for the given ``obs_id``, then fetches the corresponding
-        CAOM2 artifacts via ``caom2.Plane.publisherID``.
+        CAOM2 artifacts via ``caom2.Plane.publisherID``. The
+        ``obs_publisher_did`` column says which data product each file belongs
+        to; see :meth:`get_product_summary` for per-product totals and
+        :meth:`get_files` for one product's files.
+
+        Parameters
+        ----------
+        observation_id : str
+            The ``obs_id`` value as returned by any query method.
+        max_rows : int, optional
+            Row cap (default :attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC`);
+            a warning says when it is reached.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            Columns: ``obs_publisher_did``, ``uri``, ``productType``,
+            ``releaseType``, ``contentType``, ``contentLength``, ordered by
+            product then file.
+        """
+        _empty = Table(names=["obs_publisher_did", "uri", "productType", "releaseType",
+                              "contentType", "contentLength"])
+        dids = self._product_dids(observation_id)
+        if not dids:
+            return _empty
+        in_clause = ", ".join(f"'{_esc(d)}'" for d in dids)
+        adql = (
+            f"SELECT p.publisherID AS obs_publisher_did, a.uri, a.productType, a.releaseType, "
+            f"a.contentType, a.contentLength "
+            f"FROM {self.PLANE_TABLE} AS p "
+            f"JOIN {self.ART_TABLE} AS a ON p.planeID = a.planeID "
+            f"WHERE p.publisherID IN ({in_clause}) "
+            f"ORDER BY p.publisherID, a.uri"
+        )
+        return self._capped_query(adql, max_rows, "get_artifacts")
+
+    def get_product_summary(self, observation_id: str) -> Table:
+        """
+        One row per data product of an observation, with its file count and
+        total size — for listing an observation's products without fetching
+        every file.
 
         Parameters
         ----------
@@ -1331,34 +1409,67 @@ class DataDiscoveryClass:
         Returns
         -------
         `~astropy.table.Table`
-            Columns: ``uri``, ``productType``, ``releaseType``,
-            ``contentType``, ``contentLength``.
+            Columns: ``obs_publisher_did``, ``dataproduct_type``,
+            ``calib_level``, ``n_files``, ``total_bytes``, ordered by
+            ``obs_publisher_did``. A product with no files has ``n_files`` 0.
+            Empty if the observation is unknown.
+
+        Examples
+        --------
+        >>> obs = DataDiscovery.search(SearchFilters().add_filter("target_name", "CenA"))
+        >>> DataDiscovery.get_product_summary(str(obs["obs_id"][0]))
         """
-        _empty = Table(names=["uri", "productType", "releaseType",
-                               "contentType", "contentLength"])
-
-        # Step 1: resolve ObsCore obs_publisher_did (= CAOM2 Plane.publisherID)
-        pub_rows = self.query(
-            f"SELECT obs_publisher_did "
-            f"FROM {self.OBSCORE_TABLE} "
-            f"WHERE obs_id = '{_esc(observation_id)}'"
-        )
-        if len(pub_rows) == 0:
+        _empty = Table(names=["obs_publisher_did", "dataproduct_type", "calib_level",
+                              "n_files", "total_bytes"])
+        dids = self._product_dids(observation_id)
+        if not dids:
             return _empty
-
-        in_clause = ", ".join(
-            f"'{_esc(str(r['obs_publisher_did']))}'" for r in pub_rows
-        )
-
-        # Step 2: fetch artifacts via CAOM2 Plane.publisherID
+        in_clause = ", ".join(f"'{_esc(d)}'" for d in dids)
         adql = (
-            f"SELECT a.uri, a.productType, a.releaseType, "
-            f"       a.contentType, a.contentLength "
+            f"SELECT p.publisherID AS obs_publisher_did, p.dataProductType AS dataproduct_type, "
+            f"p.calibrationLevel AS calib_level, COUNT(a.uri) AS n_files, "
+            f"SUM(a.contentLength) AS total_bytes "
             f"FROM {self.PLANE_TABLE} AS p "
-            f"JOIN {self.ART_TABLE}   AS a ON p.planeID = a.planeID "
-            f"WHERE p.publisherID IN ({in_clause})"
+            f"LEFT OUTER JOIN {self.ART_TABLE} AS a ON p.planeID = a.planeID "
+            f"WHERE p.publisherID IN ({in_clause}) "
+            f"GROUP BY p.publisherID, p.dataProductType, p.calibrationLevel "
+            f"ORDER BY p.publisherID"
         )
-        return self.query(adql)
+        return self.query(adql, maxrec=len(dids))
+
+    def get_files(self, obs_publisher_did: str, *, max_rows: Optional[int] = None) -> Table:
+        """
+        The files of one data product.
+
+        Parameters
+        ----------
+        obs_publisher_did : str
+            The product's ``obs_publisher_did`` (from :meth:`search`,
+            :meth:`get_product_summary` or :meth:`get_artifacts`).
+        max_rows : int, optional
+            Row cap (default :attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC`);
+            a warning says when it is reached.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            Columns: ``uri``, ``productType``, ``contentType``,
+            ``contentLength``, ``contentChecksum``, ordered by ``uri``. Empty
+            if the product is unknown or has no files.
+
+        Examples
+        --------
+        >>> files = DataDiscovery.get_files(products["obs_publisher_did"][0])
+        >>> files["uri", "contentLength"]
+        """
+        adql = (
+            f"SELECT a.uri, a.productType, a.contentType, a.contentLength, a.contentChecksum "
+            f"FROM {self.PLANE_TABLE} AS p "
+            f"JOIN {self.ART_TABLE} AS a ON p.planeID = a.planeID "
+            f"WHERE p.publisherID = '{_esc(obs_publisher_did)}' "
+            f"ORDER BY a.uri"
+        )
+        return self._capped_query(adql, max_rows, "get_files")
 
     # ── NL → ADQL ─────────────────────────────────────────────────────────────
 

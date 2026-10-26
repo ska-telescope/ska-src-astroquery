@@ -1260,3 +1260,87 @@ class TestSelectColumns_OutputFields:
 
     def test_as_dict_of_an_empty_filter_set(self):
         assert SearchFilters().as_dict() == {"filters": {}}
+
+
+class TestObservationNavigation:
+    """Observation -> data products -> files: the obs_id filter,
+    get_product_summary(), get_files() and get_artifacts()."""
+
+    OBS = "ivo://skao.int/sv?ns/eb-1-obs/eb-1-eb"
+    DIDS = ["ivo://skao.int/sv?ns/eb-1-obs/eb-1-eb/SKAO-A", "ivo://skao.int/sv?ns/eb-1-obs/eb-1-eb/SKAO-B"]
+
+    def _query_returning(self, dd, *tables):
+        calls = []
+
+        def fake(adql, maxrec=None):
+            calls.append((adql, maxrec))
+            return tables[len(calls) - 1]
+        return patch.object(dd, "query", side_effect=fake), calls
+
+    def test_obs_id_filter_is_an_exact_match(self, dd):
+        f = SearchFilters().add_filter("obs_id", "ivo://skao.int/sv?ns/o'b")
+        assert dd._build_where(f) == ["obs_id = 'ivo://skao.int/sv?ns/o''b'"]
+        assert f.as_dict()["filters"] == {"obs_id": "ivo://skao.int/sv?ns/o'b"}
+
+    def test_obs_id_filter_rejects_case_sensitive(self):
+        with pytest.raises(ValueError, match="case_sensitive only applies"):
+            SearchFilters().add_filter("obs_id", "x", case_sensitive=True)
+
+    def test_product_summary_groups_files_per_product(self, dd):
+        summary = Table({"obs_publisher_did": self.DIDS, "dataproduct_type": ["visibility"] * 2,
+                         "calib_level": [2, 2], "n_files": [74, 0], "total_bytes": [746_800_000, None]})
+        patcher, calls = self._query_returning(dd, Table({"obs_publisher_did": self.DIDS}), summary)
+        with patcher:
+            result = dd.get_product_summary(self.OBS)
+        assert f"WHERE obs_id = '{self.OBS}'" in calls[0][0]
+        adql, maxrec = calls[1]
+        assert "LEFT OUTER JOIN caom2.Artifact AS a ON p.planeID = a.planeID" in adql
+        assert f"p.publisherID IN ('{self.DIDS[0]}', '{self.DIDS[1]}')" in adql
+        assert "COUNT(a.uri) AS n_files" in adql and "SUM(a.contentLength) AS total_bytes" in adql
+        assert "GROUP BY p.publisherID, p.dataProductType, p.calibrationLevel" in adql
+        assert maxrec == 2
+        assert list(result["n_files"]) == [74, 0]
+
+    def test_product_summary_of_an_unknown_observation_is_empty(self, dd):
+        patcher, calls = self._query_returning(dd, Table({"obs_publisher_did": []}))
+        with patcher:
+            result = dd.get_product_summary("nope")
+        assert len(calls) == 1
+        assert len(result) == 0
+        assert result.colnames == ["obs_publisher_did", "dataproduct_type", "calib_level", "n_files", "total_bytes"]
+
+    def test_get_files_lists_one_product(self, dd):
+        files = Table({"uri": ["skao:a/b.ms/table.dat"], "productType": ["this"],
+                       "contentType": ["application/x-casa-table"], "contentLength": [4245],
+                       "contentChecksum": [None]})
+        patcher, calls = self._query_returning(dd, files)
+        with patcher:
+            result = dd.get_files(self.DIDS[0])
+        adql, _ = calls[0]
+        assert f"WHERE p.publisherID = '{self.DIDS[0]}'" in adql
+        assert adql.endswith("ORDER BY a.uri")
+        assert result.colnames == ["uri", "productType", "contentType", "contentLength", "contentChecksum"]
+
+    def test_get_files_warns_at_the_row_cap(self, dd):
+        patcher, calls = self._query_returning(dd, Table({"uri": ["a", "b"]}))
+        with patcher, pytest.warns(UserWarning, match="max_rows"):
+            dd.get_files(self.DIDS[0], max_rows=2)
+        assert calls[0][1] == 2
+
+    def test_get_artifacts_says_which_product_each_file_belongs_to(self, dd):
+        patcher, calls = self._query_returning(
+            dd, Table({"obs_publisher_did": self.DIDS}),
+            Table({"obs_publisher_did": [self.DIDS[0]], "uri": ["skao:x"], "productType": ["this"],
+                   "releaseType": ["data"], "contentType": ["t"], "contentLength": [1]}))
+        with patcher:
+            dd.get_artifacts(self.OBS)
+        adql, _ = calls[1]
+        assert adql.startswith("SELECT p.publisherID AS obs_publisher_did, a.uri")
+        assert adql.endswith("ORDER BY p.publisherID, a.uri")
+
+    def test_get_artifacts_of_an_unknown_observation_is_empty(self, dd):
+        patcher, _ = self._query_returning(dd, Table({"obs_publisher_did": []}))
+        with patcher:
+            result = dd.get_artifacts("nope")
+        assert len(result) == 0
+        assert result.colnames[0] == "obs_publisher_did"
