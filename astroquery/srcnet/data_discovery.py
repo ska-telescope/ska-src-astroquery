@@ -47,7 +47,7 @@ from __future__ import annotations
 import re
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse, urlunparse
 
 import numpy as np
@@ -161,8 +161,10 @@ class SearchFilters:
     ...     .add_filter("dataproduct_type", "image")
     ...     .add_filter("obs_publisher_did", ["did:1", "did:2"])
     ...     .set_order("t_exptime", "DESC")
+    ...     .set_columns(["obs_publisher_did", "target_name", "t_exptime"])
     ... )
     >>> filters = SearchFilters().set_position(SkyCoord(83.8, -5.4, unit="deg"), 0.5 * u.deg)
+    >>> filters.as_dict()   # what this filter set carries
 
     Deliberately does not accept a ``project`` filter: no such column exists
     yet on Argus's ``ivoa.ObsCore`` (confirmed live —
@@ -250,6 +252,7 @@ class SearchFilters:
         self._values: Dict[str, str] = {}
         self._case_sensitive: Dict[str, bool] = {}
         self._order: Optional[Tuple[str, str]] = None
+        self._columns: Optional[List[str]] = None
 
     def add_filter(self, field: str, value, *, case_sensitive: bool = False) -> "SearchFilters":
         """
@@ -348,6 +351,69 @@ class SearchFilters:
         self._order = (field, direction)
         return self
 
+    def set_columns(self, columns: Sequence[str]) -> "SearchFilters":
+        """
+        Choose the fields :meth:`DataDiscoveryClass.search` returns, as a
+        list of ``ivoa.ObsCore`` column names, in output order. Returns
+        *self*, so this chains with :meth:`add_filter` and :meth:`set_order`.
+
+        The result table then has exactly these columns. Pagination still
+        works: ``obs_publisher_did`` (and a :meth:`set_order` field) are
+        fetched for the next-page cursor and dropped from the result if not
+        listed. Passing ``columns=`` to :meth:`~DataDiscoveryClass.search`
+        or :meth:`~DataDiscoveryClass.explain` overrides this.
+
+        Parameters
+        ----------
+        columns : sequence of str
+            One or more ``ivoa.ObsCore`` column names. Duplicates are dropped.
+
+        Raises
+        ------
+        ValueError
+            If *columns* is empty, is a single string rather than a list, or
+            names a column that isn't in ``ivoa.ObsCore``.
+        """
+        self._columns = _validate_columns(columns)
+        return self
+
+    def as_dict(self) -> Dict[str, object]:
+        """
+        The conditions, sort order and output fields this filter set carries,
+        as plain JSON-friendly values. Only what has been set appears.
+
+        Returns
+        -------
+        dict
+            Keys: ``"filters"`` (field -> value, with ``position`` as
+            ``{"ra", "dec", "radius_deg"}`` and case-sensitive fields listed
+            under ``"case_sensitive"``), ``"order"`` (``{"field",
+            "direction"}``) and ``"columns"`` (list).
+        """
+        filters: Dict[str, object] = {}
+        if self._position:
+            coordinates, radius = self._position
+            icrs = coordinates.icrs
+            filters["position"] = {
+                "ra": float(icrs.ra.deg), "dec": float(icrs.dec.deg),
+                "radius_deg": float(radius.to(u.deg).value),
+            }
+        if self._obs_publisher_did is not None:
+            filters["obs_publisher_did"] = list(self._obs_publisher_did)
+        filters.update(self._values)
+        result: Dict[str, object] = {"filters": filters}
+        case_sensitive = sorted(f for f, on in self._case_sensitive.items() if on)
+        if case_sensitive:
+            result["case_sensitive"] = case_sensitive
+        if self._order:
+            result["order"] = {"field": self._order[0], "direction": self._order[1]}
+        if self._columns:
+            result["columns"] = list(self._columns)
+        return result
+
+    def __repr__(self) -> str:
+        return f"SearchFilters({self.as_dict()!r})"
+
     # ── Read-only views used internally by _build_where/_search_adql/search() ──
     # (kept as properties, not a public dict, so that internal code is unchanged
     # from the dataclass-attribute version this replaces.)
@@ -396,6 +462,11 @@ class SearchFilters:
     def order(self) -> Optional[Tuple[str, str]]:
         """``(field, direction)`` set via :meth:`set_order`, or ``None``."""
         return self._order
+
+    @property
+    def columns(self) -> Optional[List[str]]:
+        """Output fields set via :meth:`set_columns`, or ``None``."""
+        return list(self._columns) if self._columns else None
 
 
 # ── Client class ──────────────────────────────────────────────────────────────
@@ -816,6 +887,17 @@ class DataDiscoveryClass:
 
         return where
 
+    @staticmethod
+    def _selected_columns(columns, filters: Optional[SearchFilters]) -> Optional[List[str]]:
+        """The caller's explicit field list, if any: a list passed as
+        *columns*, else *filters*' :meth:`~SearchFilters.set_columns`. A
+        string *columns* is free-form ADQL and returns ``None``."""
+        if columns is None:
+            return filters.columns if filters is not None else None
+        if isinstance(columns, str):
+            return None
+        return _validate_columns(columns)
+
     def _select_columns(self, columns: str, filters: Optional[SearchFilters], paginating: bool) -> str:
         """The SELECT list :meth:`search` actually uses — shared with
         :meth:`explain` so what the latter shows always matches.
@@ -890,7 +972,7 @@ class DataDiscoveryClass:
         self,
         filters: Optional[SearchFilters] = None,
         *,
-        columns: Optional[str] = None,
+        columns: Optional[Union[str, Sequence[str]]] = None,
         after: Optional[str] = None,
         page_size: Optional[int] = 100,
         split_obs_id: bool = True,
@@ -942,10 +1024,15 @@ class DataDiscoveryClass:
             Shared filter object — see :class:`SearchFilters`. ``None`` (the
             default) searches everything.
         columns : str, optional
-            ADQL column list. Defaults to :attr:`DEFAULT_SEARCH_COLUMNS`.
-            When paginating, ``obs_publisher_did`` (and any
-            :meth:`~SearchFilters.set_order` field) is appended if missing,
-            since the next-page cursor is read from it.
+            Output fields. A list of ``ivoa.ObsCore`` column names (checked,
+            ``ValueError`` for an unknown one) returns exactly those columns,
+            in that order; a comma-separated string is passed through as
+            ADQL, as before. Defaults to *filters*' :meth:`~SearchFilters.set_columns`
+            list, else :attr:`DEFAULT_SEARCH_COLUMNS`. When paginating,
+            ``obs_publisher_did`` (and any :meth:`~SearchFilters.set_order`
+            field) is fetched for the next-page cursor even if not selected;
+            with a list it is then dropped from the result. A list also skips
+            the ``namespace``/``filename`` columns *split_obs_id* adds.
         after : str, optional
             Keyset cursor — see above. Ignored when *page_size* is ``None``.
         page_size : int or None, optional
@@ -980,7 +1067,9 @@ class DataDiscoveryClass:
         >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
         """
         unbounded = page_size is None
-        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, not unbounded)
+        selected = self._selected_columns(columns, filters)
+        column_list = ", ".join(selected) if selected else (columns or self.DEFAULT_SEARCH_COLUMNS)
+        columns = self._select_columns(column_list, filters, not unbounded)
         order = None if filters is None else filters.order
         # Fetch one extra row to learn whether another page exists, without a
         # second round trip or an OFFSET this service doesn't support; trimmed
@@ -998,7 +1087,7 @@ class DataDiscoveryClass:
         if has_more:
             table = table[:page_size]
 
-        if split_obs_id and "obs_id" in table.colnames:
+        if split_obs_id and not selected and "obs_id" in table.colnames:
             _add_namespace_filename_columns(table)
 
         if has_more and len(table) and "obs_publisher_did" in table.colnames:
@@ -1008,6 +1097,10 @@ class DataDiscoveryClass:
                 table.meta["next_after"] = str(table["obs_publisher_did"][-1])
         else:
             table.meta["next_after"] = None
+
+        if selected:
+            # Fetched only for the cursor; the caller asked for exactly `selected`.
+            table = table[[c for c in selected if c in table.colnames]]
 
         if with_total_count:
             count_where = self._build_where(filters)
@@ -1086,7 +1179,7 @@ class DataDiscoveryClass:
         self,
         filters: Optional[SearchFilters] = None,
         *,
-        columns: Optional[str] = None,
+        columns: Optional[Union[str, Sequence[str]]] = None,
         after: Optional[str] = None,
         page_size: Optional[int] = 100,
     ) -> str:
@@ -1125,7 +1218,9 @@ class DataDiscoveryClass:
         >>> DataDiscovery.explain(SearchFilters().add_filter("collection", "JCMT"))
         "SELECT ... FROM ivoa.ObsCore WHERE UPPER(obs_collection) = UPPER('JCMT') ORDER BY obs_publisher_did ASC"
         """
-        columns = self._select_columns(columns or self.DEFAULT_SEARCH_COLUMNS, filters, page_size is not None)
+        selected = self._selected_columns(columns, filters)
+        column_list = ", ".join(selected) if selected else (columns or self.DEFAULT_SEARCH_COLUMNS)
+        columns = self._select_columns(column_list, filters, page_size is not None)
         return self._search_adql(filters, columns, after, page_size)
 
     def execute_adql(
@@ -1482,6 +1577,21 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
 def _esc(s: str) -> str:
     """Minimal ADQL string-literal escaping."""
     return s.replace("'", "''")
+
+
+def _validate_columns(columns) -> List[str]:
+    """Check a field list against the ``ivoa.ObsCore`` schema and drop
+    duplicates, keeping order. Shared by :meth:`SearchFilters.set_columns`
+    and the list form of ``columns=``."""
+    if isinstance(columns, str):
+        raise ValueError("columns must be a list of column names, not a single string")
+    columns = list(dict.fromkeys(columns))
+    if not columns:
+        raise ValueError("columns must name at least one ivoa.ObsCore column")
+    unknown = [c for c in columns if c not in _OBSCORE_COLUMNS]
+    if unknown:
+        raise ValueError(f"unknown ivoa.ObsCore column(s): {', '.join(map(repr, unknown))}")
+    return columns
 
 
 def _esc_like(s: str) -> str:
