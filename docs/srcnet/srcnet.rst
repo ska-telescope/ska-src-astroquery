@@ -697,6 +697,31 @@ pagination handles them:
     >>> t = DataDiscovery.search(filters, page_size=50)
     >>> t2 = DataDiscovery.search(filters, page_size=50, after=t.meta["next_after"])
 
+Choose the output fields with ``set_columns`` (a list of ``ivoa.ObsCore``
+column names, checked against the schema). The result then has exactly those
+columns, in that order, and pagination keeps working: the cursor columns are
+fetched behind the scenes and dropped from the result. ``search`` and
+``explain`` also take the list directly as ``columns=[...]``, which overrides
+``set_columns``. ``as_dict()`` shows the conditions, sort order and fields a
+filter set carries:
+
+.. code-block:: python
+
+    >>> filters = (
+    ...     SearchFilters()
+    ...     .add_filter("collection", "sv")
+    ...     .add_filter("dataproduct_type", "visibility")
+    ...     .set_order("t_min", "DESC")
+    ...     .set_columns(["obs_publisher_did", "target_name", "t_min", "s_fov"])
+    ... )
+    >>> filters.as_dict()
+    {'filters': {'collection': 'sv', 'dataproduct_type': 'visibility'},
+     'order': {'field': 't_min', 'direction': 'DESC'},
+     'columns': ['obs_publisher_did', 'target_name', 't_min', 's_fov']}
+    >>> t = DataDiscovery.search(filters, page_size=50)
+    >>> t.colnames
+    ['obs_publisher_did', 'target_name', 't_min', 's_fov']
+
 ``count_by`` returns grouped counts for the same filter object, largest
 first. Group fields must be ``ivoa.ObsCore`` columns (otherwise
 ``ValueError``). At most ``max_groups`` groups are returned (default 500), with

@@ -1176,3 +1176,87 @@ class TestNullSafeKeyset:
 
     def test_nan_order_value_is_a_null_cursor(self):
         assert _decode_cursor(_encode_cursor(float("nan"), "d9")) == (None, "d9")
+
+
+class TestSelectColumns_OutputFields:
+    """set_columns() / search(columns=[...]) -- choosing the output fields,
+    together with conditions and a sort order in one filter set."""
+
+    def _rows(self, n):
+        return Table({
+            "obs_publisher_did": [f"did{i:03d}" for i in range(n)],
+            "target_name": [f"T{i}" for i in range(n)],
+            "t_min": [float(59000 + i) for i in range(n)],
+            "obs_id": [f"ivo://skao.int/sv?ns/obs{i}" for i in range(n)],
+        })
+
+    def test_set_columns_chains_and_validates(self):
+        f = SearchFilters().add_filter("collection", "sv").set_columns(["target_name", "s_ra", "target_name"])
+        assert f.columns == ["target_name", "s_ra"]
+        with pytest.raises(ValueError, match="'not_a_column'"):
+            SearchFilters().set_columns(["target_name", "not_a_column"])
+        with pytest.raises(ValueError, match="at least one"):
+            SearchFilters().set_columns([])
+        with pytest.raises(ValueError, match="not a single string"):
+            SearchFilters().set_columns("target_name")
+
+    def test_conditions_order_and_columns_all_reach_the_adql(self, dd):
+        f = (SearchFilters()
+             .add_filter("collection", "sv")
+             .add_filter("target_name", "CenA")
+             .set_order("t_min", "DESC")
+             .set_columns(["target_name", "s_ra", "s_dec"]))
+        adql = dd.explain(f, page_size=10)
+        assert adql.startswith("SELECT TOP 10 target_name, s_ra, s_dec, t_min, obs_publisher_did FROM ivoa.ObsCore")
+        assert "UPPER(obs_collection) = UPPER('sv')" in adql
+        assert "UPPER(target_name) = UPPER('CenA')" in adql
+        assert adql.endswith("ORDER BY t_min DESC, obs_publisher_did ASC")
+
+    def test_search_returns_exactly_the_selected_columns_and_still_pages(self, dd):
+        f = SearchFilters().set_order("t_min").set_columns(["target_name"])
+        with patch.object(dd, "query", return_value=self._rows(4)) as mock_query:
+            result = dd.search(f, page_size=3)
+        assert "SELECT TOP 4 target_name, t_min, obs_publisher_did " in mock_query.call_args[0][0]
+        assert result.colnames == ["target_name"]
+        assert len(result) == 3
+        assert _decode_cursor(result.meta["next_after"]) == (59002.0, "did002")
+
+    def test_columns_argument_overrides_set_columns(self, dd):
+        f = SearchFilters().set_columns(["target_name"])
+        adql = dd.explain(f, columns=["s_ra", "s_dec"], page_size=None)
+        assert adql.startswith("SELECT s_ra, s_dec FROM ")
+
+    def test_columns_list_argument_is_validated(self, dd):
+        with patch.object(dd, "query") as mock_query:
+            with pytest.raises(ValueError, match="'bogus'"):
+                dd.search(columns=["target_name", "bogus"])
+        mock_query.assert_not_called()
+
+    def test_string_columns_still_pass_through_unchanged(self, dd):
+        adql = dd.explain(columns="obs_id, target_name", page_size=None)
+        assert adql.startswith("SELECT obs_id, target_name FROM ")
+
+    def test_selected_columns_skip_the_obs_id_split(self, dd):
+        with patch.object(dd, "query", return_value=self._rows(2)):
+            result = dd.search(SearchFilters().set_columns(["obs_id"]), page_size=None)
+        assert result.colnames == ["obs_id"]
+
+    def test_as_dict_reports_what_is_set(self):
+        f = (SearchFilters()
+             .set_position(SkyCoord(201.365, -43.0191, unit="deg"), 1.0 * u.deg)
+             .add_filter("collection", "sv", case_sensitive=True)
+             .add_filter("dataproduct_type", "visibility")
+             .set_order("t_min", "desc")
+             .set_columns(["obs_publisher_did", "target_name"]))
+        d = f.as_dict()
+        assert d["filters"]["collection"] == "sv"
+        assert d["filters"]["dataproduct_type"] == "visibility"
+        assert d["filters"]["position"]["radius_deg"] == pytest.approx(1.0)
+        assert d["filters"]["position"]["ra"] == pytest.approx(201.365)
+        assert d["case_sensitive"] == ["collection"]
+        assert d["order"] == {"field": "t_min", "direction": "DESC"}
+        assert d["columns"] == ["obs_publisher_did", "target_name"]
+        assert "'order': {'field': 't_min', 'direction': 'DESC'}" in repr(f)
+
+    def test_as_dict_of_an_empty_filter_set(self):
+        assert SearchFilters().as_dict() == {"filters": {}}
