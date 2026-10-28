@@ -12,6 +12,7 @@ from . import conf
 
 from astroquery.srcnet.exceptions import (handle_exceptions,
     NoAccessTokenFoundInResponse,UnsupportedOIDCFlow)
+from ._redact import redact_secrets
 
 __all__ = ['SRCNet', 'SRCNetClass']
 
@@ -158,10 +159,7 @@ def exchange_token_for_service(service):
                     self.access_token = token.get('access_token')
                     self.refresh_token = token.get('refresh_token', None)
 
-                    log.debug("Access token: {access_token}".format(
-                        access_token=self.access_token))
-                    log.debug("Refresh token: {refresh_token}".format(
-                        refresh_token=self.refresh_token))
+                    self._log_tokens_obtained()
 
                     self._persist_tokens()
                 else:
@@ -200,10 +198,7 @@ def refresh_token_if_expired(func):
                     self.access_token = token.get('access_token')
                     self.refresh_token = token.get('refresh_token', None)
 
-                    log.debug("Access token: {access_token}".format(
-                        access_token=self.access_token))
-                    log.debug("Refresh token: {refresh_token}".format(
-                        refresh_token=self.refresh_token))
+                    self._log_tokens_obtained()
 
                     self._persist_tokens()
                 else:
@@ -425,7 +420,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
                 break
             except Exception:
                 try:
-                    log.debug(token_response.json())
+                    log.debug(redact_secrets(str(token_response.json())))
                 except requests.exceptions.JSONDecodeError:
                     pass
             print("Polling for token... ({attempt}/{max_attempts})".format(
@@ -443,6 +438,15 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
             return {}
         print()
 
+
+    def _log_tokens_obtained(self):
+        """ Log that tokens were obtained, without logging the tokens themselves.
+
+        :return: Nothing.
+        :rtype: None
+        """
+        log.debug("Obtained an access token ({refresh}).".format(
+            refresh="with a refresh token" if self.refresh_token else "no refresh token"))
 
     def _persist_tokens(self):
         """ Save access and refresh tokens.
@@ -532,10 +536,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         self.access_token = token.get('access_token')
         self.refresh_token = token.get('refresh_token', None)
 
-        log.debug("Access token: {access_token}".format(
-            access_token=self.access_token))
-        log.debug("Refresh token: {refresh_token}".format(
-            refresh_token=self.refresh_token))
+        self._log_tokens_obtained()
 
         self._persist_tokens()
 

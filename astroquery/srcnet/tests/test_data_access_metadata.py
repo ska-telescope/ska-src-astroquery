@@ -53,3 +53,21 @@ def test_get_metadata_http_errors_are_still_wrapped(da):
 
     with pytest.raises(Exception, match='Error during request: 404, response: {"detail": "No metadata found"}'):
         da.get_metadata("ns", "name")
+
+
+def test_get_metadata_after_a_token_exchange():
+    """The exchange path logs and persists the new tokens through the parent client, then makes the call."""
+    srcnet = MagicMock(access_token="access", refresh_token="refresh", srcnet_dm_api_base_address=DM_API)
+    srcnet._decode_access_token.return_value = {"aud": "authn-api"}
+    exchange = MagicMock()
+    exchange.json.return_value = {"access_token": "dm-access", "refresh_token": "dm-refresh"}
+    metadata = MagicMock()
+    metadata.json.return_value = {"bytes": 123}
+    srcnet.session.get.side_effect = [exchange, metadata]
+    da = DataAccessClass(srcnet)
+
+    assert da.get_metadata("srcnet_test.comm", "eb_001.prod_001/PTF10tce.fits") == {"bytes": 123}
+
+    assert (srcnet.access_token, srcnet.refresh_token) == ("dm-access", "dm-refresh")
+    srcnet._log_tokens_obtained.assert_called_once_with()
+    srcnet._persist_tokens.assert_called_once_with()

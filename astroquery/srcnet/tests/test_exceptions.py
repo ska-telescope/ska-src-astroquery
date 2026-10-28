@@ -6,6 +6,9 @@ Covers:
   - handle_exceptions decorator: pass-through, HTTPError, CustomException, general Exception
   - _show_helpdesk: silently swallows its own failures
 """
+import time
+import traceback
+
 import pytest
 import requests
 from unittest.mock import MagicMock, patch
@@ -163,3 +166,177 @@ class TestShowHelpdeskInternal:
             _show_helpdesk("safe error message")
         except Exception as e:
             pytest.fail(f"_show_helpdesk propagated an exception: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Keeping tokens out of messages, logs and the helpdesk table
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Not a real token: three base64url segments, the first starting "eyJ".
+FAKE_JWT = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2lnbmF0dXJl"
+
+
+def _http_error(url, status_code=401, body="denied"):
+    """A real HTTPError, as raised by Response.raise_for_status()."""
+    request = requests.Request("POST", url).prepare()
+    response = requests.Response()
+    response.status_code = status_code
+    response.reason = "Unauthorized"
+    response._content = body.encode()
+    response.url = request.url
+    response.request = request
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        return e
+    raise AssertionError("raise_for_status did not raise")
+
+
+class TestRedactSecrets:
+
+    def test_removes_jwts_bearer_values_url_queries_and_token_fields(self):
+        from astroquery.srcnet._redact import redact_secrets
+
+        text = (f"jwt {FAKE_JWT}; Authorization: Bearer opaque-1; "
+                f"https://host/a?token={FAKE_JWT}&x=1 then "
+                "{'access_token': 'opaque-2', \"refresh_token\": \"opaque-3\"} token=opaque-4")
+
+        redacted = redact_secrets(text)
+
+        for secret in (FAKE_JWT, "opaque-1", "opaque-2", "opaque-3", "opaque-4", "x=1"):
+            assert secret not in redacted
+        assert "https://host/a?[REDACTED] then" in redacted
+        assert "'access_token': '[REDACTED]'" in redacted
+
+    def test_leaves_ordinary_text_alone(self):
+        from astroquery.srcnet._redact import redact_secrets
+
+        text = "Unsupported access protocol: ftp (token_type unknown, see https://host/docs)"
+        assert redact_secrets(text) == text
+
+
+    @pytest.mark.parametrize("text", [
+        "eyJ" * 100_000,
+        "https://" * 40_000,
+        "https://a?" * 30_000,
+        "Bearer " * 50_000,
+        "token=" * 50_000,
+    ], ids=["jwt-starts", "url-starts", "url-queries", "bearer", "token-fields"])
+    def test_is_linear_on_adversarial_input(self, text):
+        from astroquery.srcnet._redact import redact_secrets
+
+        # Quadratic patterns took minutes on inputs this size; linear ones take milliseconds. The bound is loose so
+        # a slow CI runner doesn't flake.
+        start = time.perf_counter()
+        redact_secrets(text)
+        assert time.perf_counter() - start < 1.0
+
+    def test_redacts_a_truncated_jwt_and_keeps_query_less_urls(self):
+        from astroquery.srcnet._redact import redact_secrets
+
+        redacted = redact_secrets("cut {} and https://host/path, https://host/q?a=1".format(FAKE_JWT[:30]))
+
+        assert FAKE_JWT[:30] not in redacted
+        assert "https://host/path," in redacted
+        assert "https://host/q?[REDACTED]" in redacted
+
+
+class TestHandleExceptionsRedaction:
+
+    def test_http_error_message_omits_the_query_string(self):
+        error = _http_error("https://permissions.example/authorise/route/x?token=" + FAKE_JWT,
+                            body='{"detail": "bad token %s"}' % FAKE_JWT)
+
+        @handle_exceptions
+        def fn():
+            raise error
+
+        with patch("astroquery.srcnet.exceptions._show_helpdesk") as mock_hd, \
+                patch("astroquery.srcnet.exceptions.log") as mock_log, \
+                pytest.raises(Exception) as info:
+            fn()
+
+        message = str(info.value)
+        assert FAKE_JWT not in message
+        assert "Unauthorized for url: https://permissions.example/authorise/route/x?[REDACTED]" in message
+        assert "bad token [REDACTED]" in message
+        assert FAKE_JWT not in str(mock_log.critical.call_args)
+        assert FAKE_JWT not in str(mock_hd.call_args)
+
+    @pytest.mark.parametrize("raised", [
+        "http",
+        "custom",
+        "general",
+    ])
+    def test_rendered_traceback_never_shows_the_original_exception(self, raised):
+        """A notebook prints the whole traceback, chained exceptions included: none may carry the token."""
+        url = "https://authn.example/refresh?refresh_token=" + FAKE_JWT
+
+        @handle_exceptions
+        def fn():
+            if raised == "http":
+                raise _http_error(url)
+            if raised == "custom":
+                raise UnsupportedAccessProtocol(url)
+            raise ValueError(url)
+
+        with patch("astroquery.srcnet.exceptions._show_helpdesk"), pytest.raises(Exception) as info:
+            fn()
+
+        rendered = "".join(traceback.format_exception(info.value))
+        assert FAKE_JWT not in rendered
+        assert "During handling of the above exception" not in rendered
+        assert info.value.__suppress_context__
+
+    def test_http_error_without_a_response_is_still_reported(self):
+        @handle_exceptions
+        def fn():
+            raise requests.exceptions.HTTPError("https://api.example/x?token=" + FAKE_JWT)
+
+        with pytest.raises(Exception, match="Error during request") as info:
+            fn()
+        assert FAKE_JWT not in str(info.value)
+
+    def test_general_error_message_is_redacted(self):
+        @handle_exceptions
+        def fn():
+            raise ValueError("cannot use " + FAKE_JWT)
+
+        with patch("astroquery.srcnet.exceptions.log") as mock_log, pytest.raises(Exception) as info:
+            fn()
+
+        assert "General error occurred" in str(info.value)
+        assert FAKE_JWT not in str(info.value)
+        assert FAKE_JWT not in str(mock_log.critical.call_args)
+
+    def test_custom_exception_message_is_redacted(self):
+        @handle_exceptions
+        def fn():
+            raise UnsupportedAccessProtocol("https://host/f?token=" + FAKE_JWT)
+
+        with pytest.raises(Exception) as info:
+            fn()
+        assert str(info.value) == "Unsupported access protocol: https://host/f?[REDACTED]"
+
+
+class TestHelpdeskAndTokenLogsRedaction:
+
+    def test_helpdesk_table_never_shows_a_token(self, capsys):
+        from astroquery.srcnet import _helpdesk
+
+        with patch.dict("sys.modules", {"IPython.display": None}):
+            _helpdesk.show_helpdesk_table("failed: Bearer " + FAKE_JWT, steps="sd.get(token=%s)" % FAKE_JWT)
+
+        assert FAKE_JWT not in capsys.readouterr().out
+
+    def test_obtained_tokens_are_not_logged(self):
+        from types import SimpleNamespace
+
+        from astroquery.srcnet import core
+
+        with patch.object(core, "log") as mock_log:
+            core.SRCNetClass._log_tokens_obtained(SimpleNamespace(access_token=FAKE_JWT, refresh_token="opaque"))
+
+        logged = str(mock_log.debug.call_args)
+        assert "with a refresh token" in logged
+        assert FAKE_JWT not in logged and "opaque" not in logged

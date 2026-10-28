@@ -25,6 +25,7 @@ from astropy import log
 from pyvo.dal.adhoc import DatalinkResults
 from urllib.parse import urlencode
 
+from astroquery.srcnet._redact import redact_secrets
 from astroquery.srcnet.exceptions import (
     handle_exceptions,
     UnsupportedAccessProtocol,
@@ -143,6 +144,9 @@ class DataAccessClass:
     def _persist_tokens(self):
         return self._srcnet._persist_tokens()
 
+    def _log_tokens_obtained(self):
+        return self._srcnet._log_tokens_obtained()
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     @handle_exceptions
@@ -218,7 +222,7 @@ class DataAccessClass:
 
         access_url = random.choice(replicas)
 
-        log.info("Downloading data from {rse} ({url})".format(rse=rse, url=access_url))
+        log.info("Downloading data from {rse} ({url})".format(rse=rse, url=redact_secrets(access_url)))
         if not (access_url.startswith("https") or access_url.startswith("davs")):
             raise UnsupportedAccessProtocol(access_url.split(":")[0])
         # davs:// is WebDAV over TLS, which requests only fetches as https://

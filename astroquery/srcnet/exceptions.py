@@ -20,6 +20,8 @@ from functools import wraps
 
 from astropy import log
 
+from ._redact import redact_secrets
+
 
 def handle_exceptions(func):
     """Decorator that catches all exceptions, logs them, shows a helpdesk table, then re-raises.
@@ -29,31 +31,39 @@ def handle_exceptions(func):
     - ``CustomException`` — uses the structured ``.message`` attribute.
     - Anything else — formats the full traceback for diagnostics.
 
+    Tokens and URL query strings are redacted from the message (see
+    :func:`~astroquery.srcnet._redact.redact_secrets`) before it is logged,
+    shown in the helpdesk table or raised.
+
     The re-raised exception is always a plain ``Exception`` so callers do not
-    need to import the original exception type.
+    need to import the original exception type. It is raised ``from None``:
+    the original exception, whose message may quote a token-bearing URL, is
+    not chained into the traceback a notebook prints.
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except requests.exceptions.HTTPError as e:
-            detail = "Error during request: {exception}, response: {response_text}".format(
+            # str(e) quotes the full URL, which may carry a token: redact it.
+            detail = redact_secrets("Error during request: {exception}, response: {response_text}".format(
                 exception=e,
-                response_text=e.response.text
-            )
+                response_text=e.response.text if e.response is not None else "No response"
+            ))
             log.critical(detail)
             _show_helpdesk(detail)
-            raise Exception(detail)
+            raise Exception(detail) from None
         except CustomException as e:
-            log.critical(e.message)
-            _show_helpdesk(e.message)
-            raise Exception(e.message)
-        except Exception as e:
-            log.critical(repr(e))
-            detail = "General error occurred: {}, traceback: {}".format(
-                repr(e), ''.join(traceback.format_tb(e.__traceback__)))
+            detail = redact_secrets(e.message)
+            log.critical(detail)
             _show_helpdesk(detail)
-            raise Exception(detail)
+            raise Exception(detail) from None
+        except Exception as e:
+            log.critical(redact_secrets(repr(e)))
+            detail = redact_secrets("General error occurred: {}, traceback: {}".format(
+                repr(e), ''.join(traceback.format_tb(e.__traceback__))))
+            _show_helpdesk(detail)
+            raise Exception(detail) from None
     return wrapper
 
 

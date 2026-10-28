@@ -18,6 +18,8 @@ Usage::
 """
 from __future__ import annotations
 
+from ._redact import redact_secrets
+
 try:
     from . import _env_urls
 except Exception:
@@ -85,7 +87,8 @@ def show_helpdesk_table(description: str, steps: str = "") -> None:
     In a Jupyter/IPython session the table is rendered as formatted Markdown.
     Outside a notebook it is printed as plain text.
     """
-    md = helpdesk_table_md(description, steps)
+    # Users paste this table into a ticket: never let a token through.
+    md = helpdesk_table_md(redact_secrets(description), redact_secrets(steps))
     try:
         import sys as _sys
         _ipd = _sys.modules.get("IPython.display")
