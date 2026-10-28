@@ -6,6 +6,8 @@ Covers:
   - handle_exceptions decorator: pass-through, HTTPError, CustomException, general Exception
   - _show_helpdesk: silently swallows its own failures
 """
+import time
+
 import pytest
 import requests
 from unittest.mock import MagicMock, patch
@@ -210,6 +212,32 @@ class TestRedactSecrets:
 
         text = "Unsupported access protocol: ftp (token_type unknown, see https://host/docs)"
         assert redact_secrets(text) == text
+
+
+    @pytest.mark.parametrize("text", [
+        "eyJ" * 100_000,
+        "https://" * 40_000,
+        "https://a?" * 30_000,
+        "Bearer " * 50_000,
+        "token=" * 50_000,
+    ], ids=["jwt-starts", "url-starts", "url-queries", "bearer", "token-fields"])
+    def test_is_linear_on_adversarial_input(self, text):
+        from astroquery.srcnet._redact import redact_secrets
+
+        # Quadratic patterns took minutes on inputs this size; linear ones take milliseconds. The bound is loose so
+        # a slow CI runner doesn't flake.
+        start = time.perf_counter()
+        redact_secrets(text)
+        assert time.perf_counter() - start < 1.0
+
+    def test_redacts_a_truncated_jwt_and_keeps_query_less_urls(self):
+        from astroquery.srcnet._redact import redact_secrets
+
+        redacted = redact_secrets("cut {} and https://host/path, https://host/q?a=1".format(FAKE_JWT[:30]))
+
+        assert FAKE_JWT[:30] not in redacted
+        assert "https://host/path," in redacted
+        assert "https://host/q?[REDACTED]" in redacted
 
 
 class TestHandleExceptionsRedaction:
