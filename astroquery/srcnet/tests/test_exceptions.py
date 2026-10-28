@@ -7,6 +7,7 @@ Covers:
   - _show_helpdesk: silently swallows its own failures
 """
 import time
+import traceback
 
 import pytest
 import requests
@@ -261,6 +262,31 @@ class TestHandleExceptionsRedaction:
         assert "bad token [REDACTED]" in message
         assert FAKE_JWT not in str(mock_log.critical.call_args)
         assert FAKE_JWT not in str(mock_hd.call_args)
+
+    @pytest.mark.parametrize("raised", [
+        "http",
+        "custom",
+        "general",
+    ])
+    def test_rendered_traceback_never_shows_the_original_exception(self, raised):
+        """A notebook prints the whole traceback, chained exceptions included: none may carry the token."""
+        url = "https://authn.example/refresh?refresh_token=" + FAKE_JWT
+
+        @handle_exceptions
+        def fn():
+            if raised == "http":
+                raise _http_error(url)
+            if raised == "custom":
+                raise UnsupportedAccessProtocol(url)
+            raise ValueError(url)
+
+        with patch("astroquery.srcnet.exceptions._show_helpdesk"), pytest.raises(Exception) as info:
+            fn()
+
+        rendered = "".join(traceback.format_exception(info.value))
+        assert FAKE_JWT not in rendered
+        assert "During handling of the above exception" not in rendered
+        assert info.value.__suppress_context__
 
     def test_http_error_without_a_response_is_still_reported(self):
         @handle_exceptions

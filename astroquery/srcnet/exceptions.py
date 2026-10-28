@@ -36,7 +36,9 @@ def handle_exceptions(func):
     shown in the helpdesk table or raised.
 
     The re-raised exception is always a plain ``Exception`` so callers do not
-    need to import the original exception type.
+    need to import the original exception type. It is raised ``from None``:
+    the original exception, whose message may quote a token-bearing URL, is
+    not chained into the traceback a notebook prints.
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -50,18 +52,18 @@ def handle_exceptions(func):
             ))
             log.critical(detail)
             _show_helpdesk(detail)
-            raise Exception(detail)
+            raise Exception(detail) from None
         except CustomException as e:
             detail = redact_secrets(e.message)
             log.critical(detail)
             _show_helpdesk(detail)
-            raise Exception(detail)
+            raise Exception(detail) from None
         except Exception as e:
             log.critical(redact_secrets(repr(e)))
             detail = redact_secrets("General error occurred: {}, traceback: {}".format(
                 repr(e), ''.join(traceback.format_tb(e.__traceback__))))
             _show_helpdesk(detail)
-            raise Exception(detail)
+            raise Exception(detail) from None
     return wrapper
 
 

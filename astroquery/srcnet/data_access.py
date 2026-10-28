@@ -144,6 +144,9 @@ class DataAccessClass:
     def _persist_tokens(self):
         return self._srcnet._persist_tokens()
 
+    def _log_tokens_obtained(self):
+        return self._srcnet._log_tokens_obtained()
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     @handle_exceptions
