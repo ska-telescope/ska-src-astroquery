@@ -269,6 +269,36 @@ is rejected unless ``output_file`` is given.
   location (any 5xx), the request is retried with ``"random"`` and a warning
   is logged.
 
+Each site holding the file is then tried in that order until one serves it.
+A site whose storage token cannot be issued, whose storage does not answer
+within ``DOWNLOAD_TIMEOUT_S`` (15 s to connect), or whose transfer fails is
+skipped with a warning, so one unreachable or misconfigured site does not stop
+the download.  The file is written to a temporary ``.part`` file beside the
+destination and renamed when complete (removed if the attempt fails); if no site can serve it, ``DownloadFailed`` lists each site's reason.
+
+get_links
+^^^^^^^^^
+
+The step from the catalogue to the data: the DataLink links of a product or
+file found with :ref:`Data Discovery <srcnet-data-discovery>`.  Pass a
+product's ``obs_publisher_did`` (``ivo://...``), a file's ``uri``
+(``skao:...``) or a Rucio DID.  Each file row has a ``rucio_did`` to download
+with ``get_data``.
+
+.. code-block:: python
+
+    >>> links = da.get_links(str(products["obs_publisher_did"][0]))
+    >>> links["semantics", "rucio_did", "access_url"]
+
+    >>> # one row per file and site: keep each file once
+    >>> files = sorted(set(links["rucio_did"]) - {""})
+    >>> da.get_data(*files[0].split(":", 1))
+
+For a product, the ``#this`` row stands for the whole product and the files are
+the ``#child`` rows.  A product stored only inside an archive links to the
+archive.  ``colocated_services`` (default empty, i.e. any replica) restricts
+the replicas to sites offering services such as ``"soda_sync,soda_async"``.
+
 soda_cutout
 ^^^^^^^^^^^
 
@@ -342,13 +372,16 @@ artifacts, then download or cut out the product of interest.
     >>> target = SkyCoord(83.8221, -5.3911, unit="deg")   # Orion Nebula
     >>> obs = tap.query_region(target, radius=1.0 * u.deg)
 
-    >>> # 2. List file artifacts for the first observation
-    >>> artifacts = tap.get_artifacts(str(obs["obs_id"][0]))
+    >>> # 2. Its data products
+    >>> products = tap.get_product_summary(str(obs["obs_id"][0]))
 
-    >>> # 3. Download the first science artifact
-    >>> uri = str(artifacts["uri"][0])   # e.g. "testing:PTF10tce.fits"
-    >>> ns, fname = uri.split(":", 1)
-    >>> da.get_data(ns, fname)
+    >>> # 3. The product's files, via DataLink, and download one
+    >>> links = da.get_links(str(products["obs_publisher_did"][0]))
+    >>> files = sorted(set(links["rucio_did"]) - {""})
+    >>> da.get_data(*files[0].split(":", 1))
+
+A file's catalogue ``uri`` (``skao:...``) is not itself a Rucio DID, so the
+DID is taken from the DataLink response rather than from the catalogue.
 
 
 Software Discovery
@@ -486,6 +519,8 @@ software TAP service in a single call.
     ...     "how many entries are there per status category?"
     ... )
 
+
+.. _srcnet-data-discovery:
 
 Data Discovery (CAOM2 TAP)
 --------------------------
@@ -772,6 +807,15 @@ observation to its products and files:
 once, with an ``obs_publisher_did`` column saying which product each belongs
 to. ``get_files`` and ``get_artifacts`` cap the rows at ``max_rows`` (default
 ``conf.SRCNET_DEFAULT_MAXREC``) and warn when the cap is reached.
+
+To download a product's files, pass its ``obs_publisher_did`` to
+``get_links`` (see Data Access).
+
+Text columns are read at their full length even when the service declares a
+smaller maximum: the SRCNet science-metadata service declares ``obs_id`` as at
+most 128 characters but returns longer observation IDs, which would otherwise
+be truncated (and then match nothing in ``get_product_summary`` or
+``get_artifacts``).
 
 query (raw ADQL)
 ^^^^^^^^^^^^^^^^

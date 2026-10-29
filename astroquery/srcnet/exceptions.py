@@ -12,7 +12,8 @@ Exception hierarchy
   ├── ``QueryRegionSearchAreaUndefined``
   ├── ``QueryRegionSearchAreaAmbiguous``
   ├── ``UnsupportedAccessProtocol``
-  └── ``UnsupportedOIDCFlow``
+  ├── ``UnsupportedOIDCFlow``
+  └── ``DownloadFailed``
 """
 import requests
 import traceback
@@ -123,4 +124,13 @@ class UnsupportedOIDCFlow(CustomException):
 
     def __init__(self, oidc_flow):
         self.message = "The {} flow is not supported".format(oidc_flow)
+        super().__init__(self.message)
+
+
+class DownloadFailed(CustomException):
+    """Raised when no site holding a file could serve it; *failures* gives each site's reason."""
+
+    def __init__(self, did, failures):
+        self.failures = failures
+        self.message = "No site could serve {did}. {reasons}".format(did=did, reasons="; ".join(failures) or "No replicas.")
         super().__init__(self.message)

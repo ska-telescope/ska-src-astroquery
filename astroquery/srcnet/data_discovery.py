@@ -44,6 +44,7 @@ Switch environment::
 
 from __future__ import annotations
 
+import io
 import re
 import warnings
 import xml.etree.ElementTree as ET
@@ -536,6 +537,7 @@ class DataDiscoveryClass:
             if self._token:
                 session.headers["Authorization"] = f"Bearer {self._token}"
             _patch_redirect_session(session, self._tap_url)
+            _unbound_text_columns(session)
             _mount_retries(session)
         return self._tap
 
@@ -1670,6 +1672,46 @@ def _patch_redirect_session(session: requests.Session, tap_url: str) -> None:
                 )
 
     session.hooks["response"].append(_fix_location)
+
+
+#: A VOTable ``FIELD`` start tag, and the bounded variable-length size of a text field (``arraysize="128*"``).
+_FIELD_TAG = re.compile(rb"<FIELD\b[^>]*>")
+_TEXT_DATATYPE = re.compile(rb'\bdatatype="(?:char|unicodeChar)"')
+_BOUNDED_ARRAYSIZE = re.compile(rb'\barraysize="\d+\*"')
+
+
+class _BufferedBody(io.BytesIO):
+    """A response body read into memory, readable like urllib3's raw stream (pyvo passes ``decode_content``)."""
+
+    def read(self, size=-1, decode_content=None):  # noqa: ARG002 - urllib3-compatible signature
+        return super().read(size)
+
+
+def _unbound_text_columns(session: requests.Session) -> None:
+    """Stop text columns from being truncated to the size the service declares.
+
+    A text column's ``arraysize="N*"`` declares at most N characters, and astropy truncates longer values to N.
+    Services do not always keep to their declared sizes: the SRCNet science-metadata Argus declares
+    ``ivoa.ObsCore.obs_id`` as ``128*`` but returns observation IDs of over 200 characters, so every ``obs_id`` came
+    back cut short and looking an observation up by it found nothing. This response hook rewrites a bounded text
+    ``arraysize`` to ``*`` (unbounded) in XML responses, before pyvo parses them. Other XML (UWS job documents) and
+    non-XML responses are passed through unchanged.
+    """
+
+    def _unbound(tag: re.Match) -> bytes:
+        field = tag.group(0)
+        return _BOUNDED_ARRAYSIZE.sub(b'arraysize="*"', field) if _TEXT_DATATYPE.search(field) else field
+
+    def _hook(response, **kwargs):
+        if "xml" not in response.headers.get("Content-Type", "").lower():
+            return
+        body = response.content  # read the (streamed) body once, so it can be rewritten
+        if b"<VOTABLE" in body[:4096]:
+            body = _FIELD_TAG.sub(_unbound, body)
+            response._content = body
+        response.raw = _BufferedBody(body)
+
+    session.hooks["response"].append(_hook)
 
 
 def _esc(s: str) -> str:
