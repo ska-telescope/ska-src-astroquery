@@ -273,8 +273,8 @@ Each site holding the file is then tried in that order until one serves it.
 A site whose storage token cannot be issued, whose storage does not answer
 within ``DOWNLOAD_TIMEOUT_S`` (15 s to connect), or whose transfer fails is
 skipped with a warning, so one unreachable or misconfigured site does not stop
-the download.  The file is written as ``<path>.part`` and renamed when
-complete; if no site can serve it, ``DownloadFailed`` lists each site's reason.
+the download.  The file is written to a temporary ``.part`` file beside the
+destination and renamed when complete (removed if the attempt fails); if no site can serve it, ``DownloadFailed`` lists each site's reason.
 
 get_links
 ^^^^^^^^^

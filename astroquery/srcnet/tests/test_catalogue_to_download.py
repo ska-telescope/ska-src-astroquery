@@ -234,16 +234,50 @@ class TestGetDataTriesEachSite:
         assert not os.path.exists(output) and not os.path.exists(output + ".part")
 
     def test_a_download_failing_midway_leaves_no_file(self, da, tmp_path):
+        """Chunks already written are discarded: no partial or final file is left behind."""
+        def chunks_then_break(**_):
+            yield b"first chunk"
+            raise requests.exceptions.ChunkedEncodingError("cut")
+
         broken = _ok()
-        broken.iter_content.side_effect = requests.exceptions.ChunkedEncodingError("cut")
+        broken.iter_content.side_effect = chunks_then_break
         da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
         output = str(tmp_path / "f.dat")
 
         with patch("requests.get", return_value=broken):
-            with pytest.raises(Exception):
+            with pytest.raises(Exception, match="No site could serve"):
                 da.get_data("ns", "f.dat", output_file=output)
 
-        assert not os.path.exists(output)
+        assert os.listdir(tmp_path) == []
+
+    def test_an_existing_file_is_untouched_until_a_download_succeeds(self, da, tmp_path):
+        """Neither the destination nor a file named like the old fixed partial name is overwritten by a failure."""
+        output = tmp_path / "f.dat"
+        output.write_bytes(b"previous")
+        lookalike = tmp_path / "f.dat.part"
+        lookalike.write_bytes(b"someone else's")
+        da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
+
+        with patch("requests.get", side_effect=requests.exceptions.ConnectTimeout("a.example")):
+            with pytest.raises(Exception):
+                da.get_data("ns", "f.dat", output_file=str(output))
+
+        assert output.read_bytes() == b"previous"
+        assert lookalike.read_bytes() == b"someone else's"
+        assert sorted(os.listdir(tmp_path)) == ["f.dat", "f.dat.part"]
+
+    def test_a_downloaded_file_gets_the_usual_permissions(self, da, tmp_path):
+        """The temporary file is owner-only; the result follows the umask like any new file."""
+        da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
+        output = tmp_path / "f.dat"
+        mask = os.umask(0o022)
+        try:
+            with patch("requests.get", return_value=_ok(chunks=[b"data"])):
+                da.get_data("ns", "f.dat", output_file=str(output))
+        finally:
+            os.umask(mask)
+
+        assert oct(output.stat().st_mode & 0o777) == oct(0o644)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

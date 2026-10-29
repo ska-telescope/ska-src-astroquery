@@ -25,6 +25,7 @@ factory method::
 import io
 import os
 import random
+import tempfile
 
 from astropy import log
 from astropy.io.votable import parse as parse_votable
@@ -51,6 +52,13 @@ DOWNLOAD_TIMEOUT_S = (15, 300)
 
 #: Metadata plugins the Data Management API accepts for ``get_metadata``.
 METADATA_PLUGINS = ("POSTGRES_JSON", "DID_COLUMN")
+
+
+def _umask():
+    """The process umask (reading it means setting it, so it is set straight back)."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def _did_from_link_id(link_id):
@@ -218,8 +226,8 @@ class DataAccessClass:
         API returns them, until one serves it: a site whose storage token
         cannot be issued, whose storage does not answer within
         :data:`DOWNLOAD_TIMEOUT_S`, or whose transfer fails is skipped with a
-        warning.  The file is written as ``<output_file>.part`` and renamed
-        when complete.  If no site can serve it, the error lists each site's
+        warning.  The file is written to a temporary ``.part`` file beside
+        *output_file* and renamed when complete (removed if the attempt fails).  If no site can serve it, the error lists each site's
         reason.
 
         Examples
@@ -301,18 +309,23 @@ class DataAccessClass:
             timeout=DOWNLOAD_TIMEOUT_S,
         )
         resp.raise_for_status()
-        if os.path.dirname(output_file):
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        partial = output_file + ".part"
-        with open(partial, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024):
-                print(
-                    "{}KB downloaded".format(round(os.path.getsize(partial) / 1024), ),
-                    end="\r",
-                )
-                f.write(chunk)
-                f.flush()
-        os.replace(partial, output_file)
+        directory = os.path.dirname(output_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        # A uniquely named partial file beside the destination: it cannot clobber an existing file or collide with
+        # another download, and it is removed if this attempt fails.
+        fd, partial = tempfile.mkstemp(prefix=os.path.basename(output_file) + ".", suffix=".part", dir=directory or ".")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024):
+                    f.write(chunk)
+                    f.flush()
+                    print("{}KB downloaded".format(round(f.tell() / 1024)), end="\r")
+            os.chmod(partial, 0o666 & ~_umask())  # mkstemp creates owner-only files; use the usual permissions
+            os.replace(partial, output_file)
+        except BaseException:
+            os.unlink(partial)
+            raise
     def get_metadata(self, namespace, name, plugin="POSTGRES_JSON"):
         """Retrieve JSON metadata for a data product.
 
