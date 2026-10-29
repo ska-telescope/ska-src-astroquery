@@ -54,6 +54,9 @@ DOWNLOAD_TIMEOUT_S = (15, 300)
 #: Kinds of asynchronous data-movement job the Data Management API runs.
 DATA_JOB_KINDS = ("move", "stage")
 
+#: Network timeout, in seconds, of a job-status request.
+JOB_STATUS_TIMEOUT_S = 60
+
 #: Job states that mean "still running", for :meth:`DataAccessClass.wait_for_job`.
 IN_PROGRESS_JOB_STATES = frozenset(
     {"PENDING", "RECEIVED", "STARTED", "RETRY", "PROGRESS", "WRAPPING", "MOVING", "VERIFYING", "PREPARING"}
@@ -545,13 +548,16 @@ class DataAccessClass:
         kind, job_id = _job_kind(kind), _required_text(job_id, "job_id")
         deadline = time.monotonic() + timeout_s
         while True:
-            status = self._get_data_job(kind, job_id)
+            # each status request is bounded by the time left, so an unresponsive server cannot outlast the limit
+            remaining = deadline - time.monotonic()
+            status = self._get_data_job(kind, job_id, timeout=max(remaining, 1))
             if _job_state(status) not in IN_PROGRESS_JOB_STATES:
                 return status
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError("{kind} job {job} still running after {t} s: {status}".format(
                     kind=kind, job=job_id, t=timeout_s, status=status))
-            time.sleep(poll_s)
+            time.sleep(min(poll_s, remaining))
 
     @handle_exceptions
     @refresh_token_if_expired
@@ -565,9 +571,9 @@ class DataAccessClass:
     @handle_exceptions
     @refresh_token_if_expired
     @exchange_token_for_service("data-management-api")
-    def _get_data_job(self, kind, job_id):
+    def _get_data_job(self, kind, job_id, timeout=JOB_STATUS_TIMEOUT_S):
         resp = self.session.get("{api}/data/{kind}/{job}".format(
-            api=self.srcnet_dm_api_base_address, kind=kind, job=job_id))
+            api=self.srcnet_dm_api_base_address, kind=kind, job=job_id), timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 

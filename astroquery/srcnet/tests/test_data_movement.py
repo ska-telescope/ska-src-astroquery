@@ -108,7 +108,25 @@ class TestFollow:
 
     def test_wait_for_job_times_out(self, da):
         da.session.get.return_value = _json({"status": "STARTED", "info": None})
+        # deadline at 15: polls at 0 and 8, then the check at 16 is past it
+        clock = iter([0, 0, 5, 8, 16])
         with patch("astroquery.srcnet.data_access.time.sleep"), \
-                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=[0, 10, 20, 30]):
+                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=lambda: next(clock)):
             with pytest.raises(TimeoutError, match="still running after 15 s"):
-                da.wait_for_job("job-1", timeout_s=15)
+                da.wait_for_job("job-1", timeout_s=15, poll_s=3)
+
+    def test_waiting_never_outlasts_the_limit(self, da):
+        """Each status request's timeout and each sleep are bounded by the time left, however long poll_s is."""
+        da.session.get.side_effect = [_json({"status": "STARTED"}), _json({"state": "READY"})]
+        clock = iter([0, 0, 2, 2])
+        with patch("astroquery.srcnet.data_access.time.sleep") as sleep, \
+                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=lambda: next(clock)):
+            assert da.wait_for_job("job-1", timeout_s=5, poll_s=600) == {"state": "READY"}
+
+        assert [c.kwargs["timeout"] for c in da.session.get.call_args_list] == [5, 3]
+        sleep.assert_called_once_with(3)
+
+    def test_get_job_status_has_a_network_timeout(self, da):
+        da.session.get.return_value = _json({"status": "STARTED"})
+        da.get_job_status("job-1")
+        assert da.session.get.call_args.kwargs["timeout"] == 60
