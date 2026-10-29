@@ -12,7 +12,7 @@ ENVIRONMENTS = {
         "dm_api":          "https://data-management.srcnet.skao.int/api/v1",
         "tap":             "https://science-metadata.srcnet.skao.int/argus/",
         "data_access_tap": "https://dachs.ivoa.srcnet.skao.int/tap",
-        "datalink":        "https://datalink.ivoa.srcnet.skao.int/rucio/links",
+        "datalink":        "https://datalink.ivoa.srcnet.skao.int/api/v1/links",  # the service ObsCore access_url uses
         "software_tap":    "https://software-discovery.srcnet.skao.int/tap/",
         "chat":            "https://chat.srcnet.skao.int",
     },
