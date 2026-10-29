@@ -25,7 +25,7 @@ factory method::
 import io
 import os
 import random
-import tempfile
+import secrets
 
 from astropy import log
 from astropy.io.votable import parse as parse_votable
@@ -54,11 +54,19 @@ DOWNLOAD_TIMEOUT_S = (15, 300)
 METADATA_PLUGINS = ("POSTGRES_JSON", "DID_COLUMN")
 
 
-def _umask():
-    """The process umask (reading it means setting it, so it is set straight back)."""
-    mask = os.umask(0)
-    os.umask(mask)
-    return mask
+def _create_partial_file(directory):
+    """Create a new partial-download file in *directory* and return ``(fd, path)``.
+
+    The name is short and random (so it fits any filename length limit and cannot be an existing file), the file is
+    created exclusively, and mode 0o666 lets the umask give it the usual permissions without touching the umask.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    while True:
+        path = os.path.join(directory, ".download-{}.part".format(secrets.token_hex(8)))
+        try:
+            return os.open(path, flags, 0o666), path
+        except FileExistsError:
+            continue
 
 
 def _did_from_link_id(link_id):
@@ -226,8 +234,9 @@ class DataAccessClass:
         API returns them, until one serves it: a site whose storage token
         cannot be issued, whose storage does not answer within
         :data:`DOWNLOAD_TIMEOUT_S`, or whose transfer fails is skipped with a
-        warning.  The file is written to a temporary ``.part`` file beside
-        *output_file* and renamed when complete (removed if the attempt fails).  If no site can serve it, the error lists each site's
+        warning.  The file is written to a temporary ``.download-*.part``
+        file beside *output_file* and renamed when complete (removed if the
+        attempt fails).  If no site can serve it, the error lists each site's
         reason.
 
         Examples
@@ -312,16 +321,15 @@ class DataAccessClass:
         directory = os.path.dirname(output_file)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        # A uniquely named partial file beside the destination: it cannot clobber an existing file or collide with
-        # another download, and it is removed if this attempt fails.
-        fd, partial = tempfile.mkstemp(prefix=os.path.basename(output_file) + ".", suffix=".part", dir=directory or ".")
+        # A new, uniquely named partial file beside the destination: it cannot clobber an existing file or collide
+        # with another download, and it is removed if this attempt fails.
+        fd, partial = _create_partial_file(directory or os.curdir)
         try:
             with os.fdopen(fd, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1024):
                     f.write(chunk)
                     f.flush()
                     print("{}KB downloaded".format(round(f.tell() / 1024)), end="\r")
-            os.chmod(partial, 0o666 & ~_umask())  # mkstemp creates owner-only files; use the usual permissions
             os.replace(partial, output_file)
         except BaseException:
             os.unlink(partial)

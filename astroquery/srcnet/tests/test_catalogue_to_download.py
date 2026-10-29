@@ -267,7 +267,7 @@ class TestGetDataTriesEachSite:
         assert sorted(os.listdir(tmp_path)) == ["f.dat", "f.dat.part"]
 
     def test_a_downloaded_file_gets_the_usual_permissions(self, da, tmp_path):
-        """The temporary file is owner-only; the result follows the umask like any new file."""
+        """The result follows the umask like any new file."""
         da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
         output = tmp_path / "f.dat"
         mask = os.umask(0o022)
@@ -278,6 +278,21 @@ class TestGetDataTriesEachSite:
             os.umask(mask)
 
         assert oct(output.stat().st_mode & 0o777) == oct(0o644)
+
+    def test_the_umask_is_never_changed(self, da, tmp_path):
+        """Changing the process-wide umask, even briefly, could expose files other threads create meanwhile."""
+        da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
+        with patch("os.umask", side_effect=AssertionError("umask changed")):
+            with patch("requests.get", return_value=_ok(chunks=[b"data"])):
+                da.get_data("ns", "f.dat", output_file=str(tmp_path / "f.dat"))
+
+    def test_a_long_destination_name_still_downloads(self, da, tmp_path):
+        """The temporary name does not grow with the destination's, so a name near the filesystem limit works."""
+        name = "x" * 250 + ".dat"
+        da.session.get.side_effect = [_ok(json_data=SITES[:1]), _ok(json_data={"access_token": "t"})]
+
+        with patch("requests.get", return_value=_ok(chunks=[b"data"])):
+            assert da.get_data("ns", name, output_file=str(tmp_path / name)).endswith(name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
