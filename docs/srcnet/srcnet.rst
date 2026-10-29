@@ -307,6 +307,13 @@ Request a sub-region of a data product via the
 service endpoint is discovered from the file's Datalink record; the result
 is streamed to ``output_file``.
 
+A cutout needs the file to have a replica at a site that runs a synchronous
+SODA service (``soda_sync``) next to that storage: DataLink is asked for such
+a replica, and its ``soda-sync`` service is called.  SODA cuts FITS images
+and cubes; it does not apply to Measurement Sets (visibilities).  If no
+suitable replica exists, the error says so (DataLink's ``No replicas with
+requested and enabled colocated services``).
+
 .. code-block:: python
 
     >>> # Circular spatial cutout (0.1° radius)
@@ -330,17 +337,17 @@ is streamed to ``output_file``.
 
 **Positional parameters** — at least one is required:
 
-+----------------+--------------------------------------+----------------------------+
-| Parameter      | Format                               | Example                    |
-+================+======================================+============================+
-| ``circle``     | ``(lon, lat, radius_deg)``           | ``(351.99, 8.78, 0.1)``    |
-+----------------+--------------------------------------+----------------------------+
-| ``polygon``    | ``[(lon, lat), …]``                  | ``[(351.9, 8.7), …]``      |
-+----------------+--------------------------------------+----------------------------+
-| ``range_``     | ``(lon1, lon2, lat1, lat2)``         | ``(351.8, 352.1, 8.6, 8.9)``|
-+----------------+--------------------------------------+----------------------------+
-| ``pos``        | SODA POS string                      | ``"CIRCLE 351.99 8.78 0.1"``|
-+----------------+--------------------------------------+----------------------------+
++-------------+------------------------------+------------------------------+
+| Parameter   | Format                       | Example                      |
++=============+==============================+==============================+
+| ``circle``  | ``(lon, lat, radius_deg)``   | ``(351.99, 8.78, 0.1)``      |
++-------------+------------------------------+------------------------------+
+| ``polygon`` | ``[(lon, lat), …]``          | ``[(351.9, 8.7), …]``        |
++-------------+------------------------------+------------------------------+
+| ``range_``  | ``(lon1, lon2, lat1, lat2)`` | ``(351.8, 352.1, 8.6, 8.9)`` |
++-------------+------------------------------+------------------------------+
+| ``pos``     | SODA POS string              | ``"CIRCLE 351.99 8.78 0.1"`` |
++-------------+------------------------------+------------------------------+
 
 **Spectral / temporal filters** (combine with a positional parameter):
 

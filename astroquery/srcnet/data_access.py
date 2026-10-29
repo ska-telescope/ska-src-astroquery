@@ -69,6 +69,48 @@ def _create_partial_file(directory):
             continue
 
 
+def _soda_query_parameters(pos, circle, polygon, range_, time, band, pol):
+    """The SODA query parameters (POS, BAND, TIME, POL) for :meth:`DataAccessClass.soda_cutout`, validated."""
+    params = {}
+    if pos:
+        params["POS"] = pos
+    elif circle:
+        if len(circle) != 3:
+            raise ValueError("circle must be (longitude, latitude, radius)")
+        params["POS"] = "CIRCLE {} {} {}".format(*circle)
+    elif polygon:
+        coords = []
+        for lon, lat in polygon:
+            coords += [str(lon), str(lat)]
+        params["POS"] = "POLYGON " + " ".join(coords)
+    elif range_:
+        if len(range_) != 4:
+            raise ValueError("range_ must be (lon1, lon2, lat1, lat2)")
+        params["POS"] = "RANGE {} {} {} {}".format(*range_)
+    else:
+        log.warning("No positional region set for SODA cutout.")
+
+    for key, value in (("BAND", band), ("TIME", time), ("POL", pol)):
+        if value is not None:
+            if "POS" not in params:
+                raise ValueError(f"A positional parameter is required when using {key!r}")
+            params[key] = value
+    return params
+
+
+def _soda_sync_service(datalink_results):
+    """The access URL and dataset ID of the ``soda-sync`` service descriptor in a DataLink response."""
+    for resource in datalink_results.votable.resources:
+        if resource.type != "meta" or getattr(resource, "ID", None) != "soda-sync":
+            continue
+        access_url = next((param.value for param in resource.params if param.name == "accessURL"), None)
+        dataset_id = next(
+            (entry.value for group in resource.groups for entry in group.entries if entry.name == "ID"), None
+        )
+        return access_url, dataset_id
+    return None, None
+
+
 def _did_from_link_id(link_id):
     """The Rucio DID ``namespace:name`` in an SRCNet DataLink row ID, ``ivo://<authority>?<namespace>/<name>``.
 
@@ -456,7 +498,6 @@ class DataAccessClass:
         ]
         return table
 
-    @handle_exceptions
     def soda_cutout(
         self,
         namespace,
@@ -488,7 +529,8 @@ class DataAccessClass:
             Destination path for the cutout FITS file,
             e.g. ``"output/cutout.fits"``.
         sort : str, optional
-            SODA service selection strategy: ``"random"`` (default) or
+            Replica selection among the sites that offer a synchronous SODA
+            service next to the data: ``"random"`` (default) or
             ``"nearest_by_ip"``, which fails while the Data Management API has
             no IP-geolocation database.
         client_ip_address : str, optional
@@ -524,14 +566,18 @@ class DataAccessClass:
         >>> da.soda_cutout("testing", "cube.fits", "subcube.fits",
         ...                circle=(83.8, -5.4, 0.5), band="0.0002 0.0003")
         """
-        if sort is None:
-            sort = "random"
+        # validated here, before any request and outside handle_exceptions, so bad arguments raise ValueError
+        params = _soda_query_parameters(pos, circle, polygon, range_, time, band, pol)
+        return self._soda_cutout(namespace, name, output_file, sort or "random", client_ip_address, params)
 
+    @handle_exceptions
+    def _soda_cutout(self, namespace, name, output_file, sort, client_ip_address, params):
         url_params = {
             "id": f"{namespace}:{name}",
-            # the current DataLink service selects replicas at sites offering these services; the legacy one
-            # (/rucio/links) reads must_include_soda instead
-            "colocated_services": "soda_sync,soda_async",
+            # A synchronous cutout needs only soda_sync next to the replica: the DM API requires every listed
+            # service, so also asking for soda_async would leave only the few sites that run both. The legacy
+            # DataLink (/rucio/links) reads must_include_soda instead.
+            "colocated_services": "soda_sync",
             "must_include_soda": "True",
             "sort": sort,
         }
@@ -540,66 +586,18 @@ class DataAccessClass:
 
         datalink_url = f"{self.srcnet_datalink_service_url}?{urlencode(url_params)}"
         log.debug(f"Using Datalink: {datalink_url}")
+        # fetched here rather than by pyvo, so an error answer (JSON) is reported as such, not as a VOTable parse error
+        resp = self.session.get(datalink_url)
+        resp.raise_for_status()
+        datalink_xml = DatalinkResults(parse_votable(io.BytesIO(resp.content)), url=datalink_url)
 
-        datalink_xml = DatalinkResults.from_result_url(datalink_url, session=self.session)
-
-        soda_service = None
-        id_param = None
-        for resource in datalink_xml.votable.resources:
-            if resource.type == "meta":
-                if getattr(resource, "ID", None) == "soda-sync":
-                    soda_service = None
-                    id_param = None
-                for param in resource.params:
-                    if param.name == "accessURL":
-                        soda_service = param.value
-                if resource.groups:
-                    for group in resource.groups:
-                        for entry in group.entries:
-                            if entry.name == "ID":
-                                id_param = entry.value
-                break
-
+        soda_service, id_param = _soda_sync_service(datalink_xml)
         if not soda_service:
-            raise ValueError("SODA service accessURL not found in Datalink response.")
+            raise ValueError("No synchronous SODA service (soda-sync) with an accessURL in the DataLink response.")
         if not id_param:
-            raise ValueError("Dataset ID not found in Datalink response.")
+            raise ValueError("No dataset ID for the SODA service in the DataLink response.")
 
-        log.debug(f"SODA service: {soda_service}")
-        log.debug(f"Dataset ID: {id_param}")
-
-        params = {"ID": id_param, "RESPONSEFORMAT": "application/fits"}
-
-        if pos:
-            params["POS"] = pos
-        elif circle:
-            if len(circle) != 3:
-                raise ValueError("circle must be (longitude, latitude, radius)")
-            params["POS"] = "CIRCLE {} {} {}".format(*circle)
-        elif polygon:
-            coords = []
-            for lon, lat in polygon:
-                coords += [str(lon), str(lat)]
-            params["POS"] = "POLYGON " + " ".join(coords)
-        elif range_:
-            if len(range_) != 4:
-                raise ValueError("range_ must be (lon1, lon2, lat1, lat2)")
-            params["POS"] = "RANGE {} {} {} {}".format(*range_)
-        else:
-            log.warning("No positional region set for SODA cutout.")
-
-        for key, value, label in [
-            ("BAND", band, "BAND"),
-            ("TIME", time, "TIME"),
-            ("POL", pol, "POL"),
-        ]:
-            if value is not None:
-                if "POS" not in params:
-                    raise ValueError(
-                        f"A positional parameter is required when using {label!r}"
-                    )
-                params[key] = value
-
+        params = {"ID": id_param, "RESPONSEFORMAT": "application/fits", **params}
         log.info(f"Requesting SODA cutout from {soda_service} with params={params}")
         response = self.session.get(soda_service, params=params, stream=True)
         response.raise_for_status()
@@ -613,6 +611,7 @@ class DataAccessClass:
                 f.flush()
         print("\n")
         log.debug(f"SODA cutout saved to '{output_file}'")
+        return output_file
 
 
 #: Module-level singleton — points at the default (production) environment.
