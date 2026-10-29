@@ -547,17 +547,20 @@ class DataAccessClass:
         """
         kind, job_id = _job_kind(kind), _required_text(job_id, "job_id")
         deadline = time.monotonic() + timeout_s
+        status = None
         while True:
-            # each status request is bounded by the time left, so an unresponsive server cannot outlast the limit
-            remaining = deadline - time.monotonic()
-            status = self._get_data_job(kind, job_id, timeout=max(remaining, 1))
-            if _job_state(status) not in IN_PROGRESS_JOB_STATES:
-                return status
+            # The deadline is checked before every request, and each request and sleep is bounded by the time left,
+            # so neither an unresponsive server nor a long poll_s can outlast the limit.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("{kind} job {job} still running after {t} s: {status}".format(
                     kind=kind, job=job_id, t=timeout_s, status=status))
-            time.sleep(min(poll_s, remaining))
+            status = self._get_data_job(kind, job_id, timeout=min(remaining, JOB_STATUS_TIMEOUT_S))
+            if _job_state(status) not in IN_PROGRESS_JOB_STATES:
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(poll_s, remaining))
 
     @handle_exceptions
     @refresh_token_if_expired
