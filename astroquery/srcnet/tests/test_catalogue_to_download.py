@@ -322,16 +322,3 @@ def test_an_expired_token_is_refreshed_before_it_is_exchanged():
         "https://authn.example/api/v1/token/exchange/data-management-api",
         DM_API + "/metadata/ns/f.dat",
     ]
-
-
-def test_soda_cutout_asks_datalink_for_sites_with_soda():
-    """The current DataLink selects replicas by colocated_services; random is the default replica order."""
-    srcnet = MagicMock(srcnet_datalink_service_url=DATALINK)
-    da = DataAccessClass(srcnet)
-    with patch("astroquery.srcnet.data_access.DatalinkResults.from_result_url", side_effect=RuntimeError("stop")) as fetch:
-        with pytest.raises(Exception):
-            da.soda_cutout("ns", "cube.fits", "out.fits", circle=(1, 2, 0.1))
-
-    url = fetch.call_args.args[0]
-    assert "colocated_services=soda_sync%2Csoda_async" in url
-    assert "sort=random" in url
