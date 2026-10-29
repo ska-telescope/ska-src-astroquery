@@ -123,6 +123,10 @@ questions without repeating context.  Call SRCNet._chat.reset() to start fresh.
 """
 
 
+#: Network timeout, in seconds, of the token exchange and refresh requests the auth decorators make.
+TOKEN_REQUEST_TIMEOUT_S = 60
+
+
 @handle_exceptions
 def exchange_token_for_service(service):
     """ Decorator to exchange an existing access token for one with an audience
@@ -142,7 +146,7 @@ def exchange_token_for_service(service):
                         "try_use_cache": True,
                         "access_token": self.access_token,
                         "refresh_token": self.refresh_token
-                    })
+                    }, timeout=TOKEN_REQUEST_TIMEOUT_S)
                     resp.raise_for_status()
 
                     log.info(
@@ -186,7 +190,7 @@ def refresh_token_if_expired(func):
                         api_url=self.srcnet_authn_api_address)
                     resp = self.session.get(refresh_token_endpoint, params={
                         "refresh_token": self.refresh_token
-                    })
+                    }, timeout=TOKEN_REQUEST_TIMEOUT_S)
                     resp.raise_for_status()
 
                     log.info("Refreshed token.")

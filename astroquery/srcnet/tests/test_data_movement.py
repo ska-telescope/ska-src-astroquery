@@ -142,3 +142,22 @@ class TestFollow:
         da.session.get.return_value = _json({"status": "STARTED"})
         da.get_job_status("job-1")
         assert da.session.get.call_args.kwargs["timeout"] == 60
+
+
+def test_token_refresh_and_exchange_requests_have_a_network_timeout():
+    """They run before every authenticated call (wait_for_job's polls included), so they must not hang."""
+    srcnet = MagicMock(access_token="old", refresh_token="refresh", srcnet_dm_api_base_address=DM_API,
+                       srcnet_authn_api_address="https://authn.example/api/v1")
+    srcnet._decode_access_token.side_effect = [{"exp": 1}, {"exp": 1}, {"aud": "authn-api"}]
+    srcnet.session.get.side_effect = [
+        _json({"access_token": "fresh", "refresh_token": "r2"}),
+        _json({"access_token": "dm", "refresh_token": "r3"}),
+        _json({"status": "STARTED"}),
+    ]
+
+    DataAccessClass(srcnet).get_job_status("job-1")
+
+    refresh, exchange, status = srcnet.session.get.call_args_list
+    assert refresh.args[0].endswith("/refresh") and refresh.kwargs["timeout"] == 60
+    assert exchange.args[0].endswith("/token/exchange/data-management-api") and exchange.kwargs["timeout"] == 60
+    assert status.kwargs["timeout"] == 60
