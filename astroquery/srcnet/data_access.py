@@ -25,6 +25,7 @@ factory method::
 import io
 import os
 import random
+import time
 import secrets
 
 from astropy import log
@@ -40,8 +41,10 @@ from astroquery.srcnet.exceptions import (
     UnsupportedAccessProtocol,
 )
 from astroquery.srcnet.core import (
+    REQUEST_DEADLINE,
     exchange_token_for_service,
     refresh_token_if_expired,
+    request_timeout,
 )
 
 __all__ = ["DataAccess", "DataAccessClass"]
@@ -49,6 +52,17 @@ __all__ = ["DataAccess", "DataAccessClass"]
 #: Connect and read timeouts, in seconds, for downloads from storage: a site that does not answer is skipped rather
 #: than hung on (some storage doors drop connections from outside SRCNet).
 DOWNLOAD_TIMEOUT_S = (15, 300)
+
+#: Kinds of asynchronous data-movement job the Data Management API runs.
+DATA_JOB_KINDS = ("move", "stage")
+
+#: Network timeout, in seconds, of a job-status request.
+JOB_STATUS_TIMEOUT_S = 60
+
+#: Job states that mean "still running", for :meth:`DataAccessClass.wait_for_job`.
+IN_PROGRESS_JOB_STATES = frozenset(
+    {"PENDING", "RECEIVED", "STARTED", "RETRY", "PROGRESS", "WRAPPING", "MOVING", "VERIFYING", "PREPARING"}
+)
 
 #: Metadata plugins the Data Management API accepts for ``get_metadata``.
 METADATA_PLUGINS = ("POSTGRES_JSON", "DID_COLUMN")
@@ -119,6 +133,51 @@ def _did_from_link_id(link_id):
     _, _, path = link_id.partition("?")
     namespace, _, name = path.partition("/")
     return f"{namespace}:{name}" if namespace and name else ""
+
+
+def _dids_body(dids):
+    """``[{"namespace": ..., "name": ...}]`` for the Data Management API, from DIDs in any of the accepted forms."""
+    if isinstance(dids, (str, tuple, dict)):
+        dids = [dids]
+    body = []
+    for did in dids:
+        if isinstance(did, str):
+            namespace, _, name = did.partition(":")
+        elif isinstance(did, tuple) and len(did) == 2:
+            namespace, name = did
+        elif isinstance(did, dict):
+            namespace, name = did.get("namespace"), did.get("name")
+        else:
+            raise ValueError("a DID must be 'namespace:name', (namespace, name) or a dict, not {!r}".format(did))
+        if not namespace or not name:
+            raise ValueError("a DID needs a namespace and a name: {!r}".format(did))
+        body.append({"namespace": str(namespace), "name": str(name)})
+    if not body:
+        raise ValueError("dids must name at least one data identifier")
+    return body
+
+
+def _positive_int(value, what):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("{what} must be a positive number of seconds, not {value!r}".format(what=what, value=value))
+    return value
+
+
+def _required_text(value, what):
+    if not value or not str(value).strip():
+        raise ValueError("{what} must not be empty".format(what=what))
+    return str(value).strip()
+
+
+def _job_kind(kind):
+    if kind not in DATA_JOB_KINDS:
+        raise ValueError("kind must be one of {kinds}, not {kind!r}".format(kinds=", ".join(DATA_JOB_KINDS), kind=kind))
+    return kind
+
+
+def _job_state(status):
+    """The state in a job status: ``status`` while it runs, ``state`` (or ``status``) once it is done."""
+    return str(status.get("status") or status.get("state") or "").upper()
 
 
 def _default_output_path(name):
@@ -429,6 +488,152 @@ class DataAccessClass:
             api=self.srcnet_dm_api_base_address, ns=namespace, name=name
         )
         resp = self.session.get(url, params={"plugin": plugin})
+        resp.raise_for_status()
+        return resp.json()
+
+    # ── Data movement ─────────────────────────────────────────────────────────
+
+    def move_data(self, dids, to_storage_area, lifetime=3600, parent_namespace=None):
+        """Replicate data to another storage area.
+
+        Asks the Data Management API to add Rucio replication rules so that a
+        copy of each DID is made at *to_storage_area*.  This runs as a job on
+        the server; poll it with :meth:`get_job_status` or
+        :meth:`wait_for_job` (``kind="move"``).
+
+        Parameters
+        ----------
+        dids : list
+            The data to replicate: ``"namespace:name"`` strings,
+            ``(namespace, name)`` pairs, or ``{"namespace": ..., "name": ...}``
+            dicts.
+        to_storage_area : str
+            UUID of the destination storage area, as listed by the Site
+            Capabilities API (e.g. a replica's ``associated_storage_area_id``).
+        lifetime : int, optional
+            Lifetime of the new replicas, in seconds (default one hour).
+        parent_namespace : str, optional
+            Namespace of the container the DIDs are grouped in; defaults to the
+            first DID's.
+
+        Returns
+        -------
+        str
+            The job ID.
+
+        Examples
+        --------
+        >>> job = da.move_data(["srcnet_test.comm:test_eb_001.test_prod_001/PTF10tce.fits"],
+        ...                    to_storage_area="f26ff4e4-30af-4339-88ed-bb0cb7037ca0", lifetime=86400)
+        >>> da.wait_for_job(job, kind="move")
+        """
+        params = {"to_storage_area_uuid": _required_text(to_storage_area, "to_storage_area"),
+                  "lifetime": _positive_int(lifetime, "lifetime")}
+        if parent_namespace:
+            params["parent_namespace"] = parent_namespace
+        return self._submit_data_job("move", _dids_body(dids), params)
+
+    def stage_data(self, dids, to_storage_area=None, lifetime=3600, parent_namespace=None, approach=None):
+        """Stage data in a storage area, e.g. next to the compute that will use it.
+
+        Like :meth:`move_data`, but through the Data Management API's staging
+        workflow; poll the job with ``kind="stage"``.
+
+        Parameters
+        ----------
+        dids : list
+            As for :meth:`move_data`.
+        to_storage_area : str, optional
+            UUID of the storage area to stage into; the server chooses if
+            omitted.
+        lifetime : int, optional
+            Lifetime of the staged copies, in seconds (default one hour).
+        parent_namespace : str, optional
+            As for :meth:`move_data`.
+        approach : str, optional
+            Staging approach, one of those the destination's staging service
+            supports.
+
+        Returns
+        -------
+        str
+            The job ID.
+        """
+        params = {"lifetime": _positive_int(lifetime, "lifetime")}
+        if to_storage_area:
+            params["to_storage_area_uuid"] = to_storage_area
+        if parent_namespace:
+            params["parent_namespace"] = parent_namespace
+        if approach:
+            params["approach"] = approach
+        return self._submit_data_job("stage", _dids_body(dids), params)
+
+    def get_job_status(self, job_id, kind="move"):
+        """The status of a :meth:`move_data` (``kind="move"``) or :meth:`stage_data` (``kind="stage"``) job.
+
+        Returns
+        -------
+        dict
+            As the Data Management API reports it: while the job runs,
+            ``{"status": ..., "info": ...}``; when it is done, its result
+            (e.g. a ``state`` of ``READY`` or ``ERROR``, or a ``status`` of
+            ``FAILED`` with an ``error_message``).
+        """
+        return self._get_data_job(_job_kind(kind), _required_text(job_id, "job_id"))
+
+    def wait_for_job(self, job_id, kind="move", timeout_s=3600, poll_s=10):
+        """Poll a data-movement job until it is no longer running, and return its final status.
+
+        Every request made while waiting, including any token refresh or
+        exchange, times out by the deadline, so the wait never outlasts
+        *timeout_s*.
+
+        Raises
+        ------
+        TimeoutError
+            If the job is still running after *timeout_s* seconds, or no
+            answer came in time.
+        """
+        kind, job_id = _job_kind(kind), _required_text(job_id, "job_id")
+        deadline = time.monotonic() + timeout_s
+        # Every request made for this wait, token refresh and exchange included, times out by the deadline.
+        context = REQUEST_DEADLINE.set(deadline)
+        status = None
+        try:
+            while True:
+                if deadline - time.monotonic() <= 0:
+                    raise TimeoutError("{kind} job {job} still running after {t} s: {status}".format(
+                        kind=kind, job=job_id, t=timeout_s, status=status))
+                try:
+                    status = self._get_data_job(kind, job_id)
+                except Exception as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("{kind} job {job}: no answer within {t} s ({error})".format(
+                            kind=kind, job=job_id, t=timeout_s, error=exc)) from None
+                    raise
+                if _job_state(status) not in IN_PROGRESS_JOB_STATES:
+                    return status
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(poll_s, remaining))
+        finally:
+            REQUEST_DEADLINE.reset(context)
+
+    @handle_exceptions
+    @refresh_token_if_expired
+    @exchange_token_for_service("data-management-api")
+    def _submit_data_job(self, kind, body, params):
+        resp = self.session.post("{api}/data/{kind}".format(api=self.srcnet_dm_api_base_address, kind=kind),
+                                 params=params, json=body)
+        resp.raise_for_status()
+        return resp.json()["job_id"]
+
+    @handle_exceptions
+    @refresh_token_if_expired
+    @exchange_token_for_service("data-management-api")
+    def _get_data_job(self, kind, job_id):
+        resp = self.session.get("{api}/data/{kind}/{job}".format(
+            api=self.srcnet_dm_api_base_address, kind=kind, job=job_id), timeout=request_timeout(JOB_STATUS_TIMEOUT_S))
         resp.raise_for_status()
         return resp.json()
 

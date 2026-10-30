@@ -1,4 +1,5 @@
 import base64
+import contextvars
 import json
 import os
 import qrcode
@@ -123,6 +124,23 @@ questions without repeating context.  Call SRCNet._chat.reset() to start fresh.
 """
 
 
+#: Network timeout, in seconds, of the token exchange and refresh requests the auth decorators make.
+TOKEN_REQUEST_TIMEOUT_S = 60
+
+#: A ``time.monotonic()`` deadline for the requests made in the current context, set by
+#: :meth:`~astroquery.srcnet.data_access.DataAccessClass.wait_for_job` so that no request it makes (token refresh
+#: and exchange included) can outlast its timeout. ``None`` outside such a wait.
+REQUEST_DEADLINE = contextvars.ContextVar("srcnet_request_deadline", default=None)
+
+
+def request_timeout(default):
+    """A request's network timeout: *default*, or the time left before :data:`REQUEST_DEADLINE` if that is sooner."""
+    deadline = REQUEST_DEADLINE.get()
+    if deadline is None:
+        return default
+    return max(min(deadline - time.monotonic(), default), 0.001)
+
+
 @handle_exceptions
 def exchange_token_for_service(service):
     """ Decorator to exchange an existing access token for one with an audience
@@ -142,7 +160,7 @@ def exchange_token_for_service(service):
                         "try_use_cache": True,
                         "access_token": self.access_token,
                         "refresh_token": self.refresh_token
-                    })
+                    }, timeout=request_timeout(TOKEN_REQUEST_TIMEOUT_S))
                     resp.raise_for_status()
 
                     log.info(
@@ -186,7 +204,7 @@ def refresh_token_if_expired(func):
                         api_url=self.srcnet_authn_api_address)
                     resp = self.session.get(refresh_token_endpoint, params={
                         "refresh_token": self.refresh_token
-                    })
+                    }, timeout=request_timeout(TOKEN_REQUEST_TIMEOUT_S))
                     resp.raise_for_status()
 
                     log.info("Refreshed token.")

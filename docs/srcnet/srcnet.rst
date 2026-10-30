@@ -299,6 +299,30 @@ the ``#child`` rows.  A product stored only inside an archive links to the
 archive.  ``colocated_services`` (default empty, i.e. any replica) restricts
 the replicas to sites offering services such as ``"soda_sync,soda_async"``.
 
+move_data, stage_data
+^^^^^^^^^^^^^^^^^^^^^
+
+Ask the Data Management API to replicate data to another storage area
+(``move_data``: it adds Rucio replication rules) or to stage it, e.g. next to
+the compute that will use it (``stage_data``).  Both run as jobs on the server
+and return a job ID; ``get_job_status`` reports on a job and ``wait_for_job``
+polls it until it is done.  DIDs can be ``"namespace:name"`` strings,
+``(namespace, name)`` pairs or ``{"namespace": ..., "name": ...}`` dicts.
+
+.. code-block:: python
+
+    >>> # A one-day copy of a file at another site's storage area
+    >>> job = da.move_data(
+    ...     ["srcnet_test.comm:test_eb_001.test_prod_001/PTF10tce.fits"],
+    ...     to_storage_area="f26ff4e4-30af-4339-88ed-bb0cb7037ca0",   # CHSRC-CSCS-T0
+    ...     lifetime=86400,
+    ... )
+    >>> da.wait_for_job(job, kind="move")
+    {'state': 'READY', ...}
+
+Storage areas are identified by their UUID, as listed by the Site
+Capabilities API.  The replicas expire after ``lifetime`` seconds.
+
 soda_cutout
 ^^^^^^^^^^^
 
