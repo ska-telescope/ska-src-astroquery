@@ -4,6 +4,12 @@
 New Tools and Services
 ----------------------
 
+srcnet
+^^^^^^
+
+- ``DataAccess.move_data`` and ``stage_data`` ask the SRCNet Data Management API to replicate data
+  to another storage area or to stage it; ``get_job_status`` and ``wait_for_job`` follow the job.
+
 eso
 ^^^
 

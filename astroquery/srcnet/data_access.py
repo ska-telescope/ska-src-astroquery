@@ -41,8 +41,10 @@ from astroquery.srcnet.exceptions import (
     UnsupportedAccessProtocol,
 )
 from astroquery.srcnet.core import (
+    REQUEST_DEADLINE,
     exchange_token_for_service,
     refresh_token_if_expired,
+    request_timeout,
 )
 
 __all__ = ["DataAccess", "DataAccessClass"]
@@ -540,27 +542,40 @@ class DataAccessClass:
     def wait_for_job(self, job_id, kind="move", timeout_s=3600, poll_s=10):
         """Poll a data-movement job until it is no longer running, and return its final status.
 
+        Every request made while waiting, including any token refresh or
+        exchange, times out by the deadline, so the wait never outlasts
+        *timeout_s*.
+
         Raises
         ------
         TimeoutError
-            If the job is still running after *timeout_s* seconds.
+            If the job is still running after *timeout_s* seconds, or no
+            answer came in time.
         """
         kind, job_id = _job_kind(kind), _required_text(job_id, "job_id")
         deadline = time.monotonic() + timeout_s
+        # Every request made for this wait, token refresh and exchange included, times out by the deadline.
+        context = REQUEST_DEADLINE.set(deadline)
         status = None
-        while True:
-            # The deadline is checked before every request, and each request and sleep is bounded by the time left,
-            # so neither an unresponsive server nor a long poll_s can outlast the limit.
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("{kind} job {job} still running after {t} s: {status}".format(
-                    kind=kind, job=job_id, t=timeout_s, status=status))
-            status = self._get_data_job(kind, job_id, timeout=min(remaining, JOB_STATUS_TIMEOUT_S))
-            if _job_state(status) not in IN_PROGRESS_JOB_STATES:
-                return status
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(poll_s, remaining))
+        try:
+            while True:
+                if deadline - time.monotonic() <= 0:
+                    raise TimeoutError("{kind} job {job} still running after {t} s: {status}".format(
+                        kind=kind, job=job_id, t=timeout_s, status=status))
+                try:
+                    status = self._get_data_job(kind, job_id)
+                except Exception as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("{kind} job {job}: no answer within {t} s ({error})".format(
+                            kind=kind, job=job_id, t=timeout_s, error=exc)) from None
+                    raise
+                if _job_state(status) not in IN_PROGRESS_JOB_STATES:
+                    return status
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(poll_s, remaining))
+        finally:
+            REQUEST_DEADLINE.reset(context)
 
     @handle_exceptions
     @refresh_token_if_expired
@@ -574,9 +589,9 @@ class DataAccessClass:
     @handle_exceptions
     @refresh_token_if_expired
     @exchange_token_for_service("data-management-api")
-    def _get_data_job(self, kind, job_id, timeout=JOB_STATUS_TIMEOUT_S):
+    def _get_data_job(self, kind, job_id):
         resp = self.session.get("{api}/data/{kind}/{job}".format(
-            api=self.srcnet_dm_api_base_address, kind=kind, job=job_id), timeout=timeout)
+            api=self.srcnet_dm_api_base_address, kind=kind, job=job_id), timeout=request_timeout(JOB_STATUS_TIMEOUT_S))
         resp.raise_for_status()
         return resp.json()
 

@@ -5,6 +5,9 @@ Management API, get_job_status / wait_for_job follow them.
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+
+from astroquery.srcnet.core import REQUEST_DEADLINE
 
 from astroquery.srcnet.data_access import DataAccessClass
 
@@ -80,6 +83,46 @@ class TestSubmit:
         da.session.get.assert_not_called()
 
 
+class FakeClock:
+    """time.monotonic/time.sleep stand-ins: time passes only by sleeping or through ``advance``."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock():
+    fake = FakeClock()
+    with patch("time.monotonic", fake.monotonic), patch("time.sleep", fake.sleep):
+        yield fake
+
+
+def _answers(clock, *responses, takes=0.0):
+    """session.get side effect: each call takes *takes* seconds and records its timeout."""
+    timeouts = []
+    responses = iter(responses)
+
+    def get(url, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        clock.advance(takes)
+        answer = next(responses)
+        if isinstance(answer, Exception):
+            raise answer
+        return _json(answer)
+    return get, timeouts
+
+
 class TestFollow:
 
     def test_get_job_status_returns_what_the_api_reports(self, da):
@@ -87,65 +130,84 @@ class TestFollow:
 
         assert da.get_job_status("job-1", kind="stage") == {"status": "STARTED", "info": "moving"}
         assert da.session.get.call_args.args[0] == DM_API + "/data/stage/job-1"
-
-    def test_wait_for_job_polls_until_the_job_is_done(self, da):
-        da.session.get.side_effect = [
-            _json({"status": "PENDING", "info": None}),
-            _json({"status": "MOVING", "info": "1/1"}),
-            _json({"state": "READY"}),
-        ]
-        with patch("astroquery.srcnet.data_access.time.sleep") as sleep:
-            assert da.wait_for_job("job-1", poll_s=5) == {"state": "READY"}
-
-        assert da.session.get.call_count == 3
-        sleep.assert_called_with(5)
-
-    def test_a_failed_job_is_returned_not_waited_on(self, da):
-        da.session.get.return_value = _json({"status": "FAILED", "error_message": "no quota"})
-        with patch("astroquery.srcnet.data_access.time.sleep") as sleep:
-            assert da.wait_for_job("job-1", kind="stage")["error_message"] == "no quota"
-        sleep.assert_not_called()
-
-    def test_wait_for_job_times_out(self, da):
-        da.session.get.return_value = _json({"status": "STARTED", "info": None})
-        # deadline at 15: polls at 0 and 8, then the checks at 16 are past it
-        clock = iter([0, 0, 5, 8, 16, 16])
-        with patch("astroquery.srcnet.data_access.time.sleep"), \
-                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=lambda: next(clock)):
-            with pytest.raises(TimeoutError, match="still running after 15 s"):
-                da.wait_for_job("job-1", timeout_s=15, poll_s=3)
-
-    def test_waiting_never_outlasts_the_limit(self, da):
-        """Each status request's timeout and each sleep are bounded by the time left, however long poll_s is."""
-        da.session.get.side_effect = [_json({"status": "STARTED"}), _json({"state": "READY"})]
-        clock = iter([0, 0, 2, 2])
-        with patch("astroquery.srcnet.data_access.time.sleep") as sleep, \
-                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=lambda: next(clock)):
-            assert da.wait_for_job("job-1", timeout_s=5, poll_s=600) == {"state": "READY"}
-
-        assert [c.kwargs["timeout"] for c in da.session.get.call_args_list] == [5, 3]
-        sleep.assert_called_once_with(3)
-
-    def test_no_request_is_sent_once_the_deadline_has_passed(self, da):
-        """A sleep that reaches the deadline ends the wait; it does not send one more request."""
-        da.session.get.return_value = _json({"status": "STARTED"})
-        clock = iter([0, 0, 4, 5])
-        with patch("astroquery.srcnet.data_access.time.sleep") as sleep, \
-                patch("astroquery.srcnet.data_access.time.monotonic", side_effect=lambda: next(clock)):
-            with pytest.raises(TimeoutError):
-                da.wait_for_job("job-1", timeout_s=5, poll_s=10)
-
-        assert da.session.get.call_count == 1
-        sleep.assert_called_once_with(1)
-
-    def test_get_job_status_has_a_network_timeout(self, da):
-        da.session.get.return_value = _json({"status": "STARTED"})
-        da.get_job_status("job-1")
         assert da.session.get.call_args.kwargs["timeout"] == 60
 
+    def test_wait_for_job_polls_until_the_job_is_done(self, da, clock):
+        da.session.get.side_effect, _ = _answers(clock, {"status": "PENDING"}, {"status": "MOVING"}, {"state": "READY"})
 
-def test_token_refresh_and_exchange_requests_have_a_network_timeout():
-    """They run before every authenticated call (wait_for_job's polls included), so they must not hang."""
+        assert da.wait_for_job("job-1", poll_s=5) == {"state": "READY"}
+        assert clock.sleeps == [5, 5]
+
+    def test_a_failed_job_is_returned_not_waited_on(self, da, clock):
+        da.session.get.side_effect, _ = _answers(clock, {"status": "FAILED", "error_message": "no quota"})
+
+        assert da.wait_for_job("job-1", kind="stage")["error_message"] == "no quota"
+        assert clock.sleeps == []
+
+    def test_wait_for_job_times_out(self, da, clock):
+        da.session.get.side_effect, _ = _answers(clock, *[{"status": "STARTED"}] * 10)
+
+        with pytest.raises(TimeoutError, match="still running after 15 s"):
+            da.wait_for_job("job-1", timeout_s=15, poll_s=4)
+        assert clock.now == 15
+
+    def test_each_request_and_sleep_is_bounded_by_the_time_left(self, da, clock):
+        da.session.get.side_effect, timeouts = _answers(clock, {"status": "STARTED"}, {"state": "READY"})
+
+        assert da.wait_for_job("job-1", timeout_s=5, poll_s=3) == {"state": "READY"}
+        assert timeouts == [5, 2]
+        assert clock.sleeps == [3]
+
+    def test_no_request_is_sent_once_the_deadline_has_passed(self, da, clock):
+        da.session.get.side_effect, timeouts = _answers(clock, {"status": "STARTED"}, {"status": "STARTED"})
+
+        with pytest.raises(TimeoutError):
+            da.wait_for_job("job-1", timeout_s=5, poll_s=10)
+        assert len(timeouts) == 1
+        assert clock.sleeps == [5]
+
+    def test_a_request_cut_off_by_the_deadline_is_a_timeout(self, da, clock):
+        """A server that accepts the request but does not answer in time ends the wait with TimeoutError."""
+        def hang(url, **kwargs):
+            clock.advance(kwargs["timeout"])
+            raise requests.exceptions.ReadTimeout("no answer")
+        da.session.get.side_effect = hang
+
+        with patch("astroquery.srcnet.exceptions._show_helpdesk"):
+            with pytest.raises(TimeoutError, match="no answer within 5 s"):
+                da.wait_for_job("job-1", timeout_s=5)
+        assert clock.now == 5
+
+    def test_the_deadline_applies_only_during_the_wait(self, da, clock):
+        da.session.get.side_effect, timeouts = _answers(clock, {"state": "READY"}, {"status": "STARTED"})
+
+        da.wait_for_job("job-1", timeout_s=5)
+        assert REQUEST_DEADLINE.get() is None
+        da.get_job_status("job-1")
+        assert timeouts == [5, 60]
+
+
+def test_token_requests_are_bounded_by_the_wait_deadline(clock):
+    """Refreshing and exchanging an expired token during a wait cannot outlast it either."""
+    srcnet = MagicMock(access_token="old", refresh_token="refresh", srcnet_dm_api_base_address=DM_API,
+                       srcnet_authn_api_address="https://authn.example/api/v1")
+    srcnet._decode_access_token.side_effect = [{"exp": 1}, {"exp": 1}, {"aud": "authn-api"}]
+    srcnet.session.get.side_effect, timeouts = _answers(
+        clock,
+        {"access_token": "fresh", "refresh_token": "r2"},
+        {"access_token": "dm", "refresh_token": "r3"},
+        {"state": "READY"},
+        takes=1,
+    )
+
+    assert DataAccessClass(srcnet).wait_for_job("job-1", timeout_s=5) == {"state": "READY"}
+
+    urls = [call.args[0] for call in srcnet.session.get.call_args_list]
+    assert urls[0].endswith("/refresh") and urls[1].endswith("/token/exchange/data-management-api")
+    assert timeouts == [5, 4, 3]
+
+
+def test_token_requests_have_a_timeout_outside_a_wait():
     srcnet = MagicMock(access_token="old", refresh_token="refresh", srcnet_dm_api_base_address=DM_API,
                        srcnet_authn_api_address="https://authn.example/api/v1")
     srcnet._decode_access_token.side_effect = [{"exp": 1}, {"exp": 1}, {"aud": "authn-api"}]
@@ -157,7 +219,4 @@ def test_token_refresh_and_exchange_requests_have_a_network_timeout():
 
     DataAccessClass(srcnet).get_job_status("job-1")
 
-    refresh, exchange, status = srcnet.session.get.call_args_list
-    assert refresh.args[0].endswith("/refresh") and refresh.kwargs["timeout"] == 60
-    assert exchange.args[0].endswith("/token/exchange/data-management-api") and exchange.kwargs["timeout"] == 60
-    assert status.kwargs["timeout"] == 60
+    assert [call.kwargs["timeout"] for call in srcnet.session.get.call_args_list] == [60, 60, 60]
