@@ -707,19 +707,33 @@ instead:
 that has no case-insensitive default to opt out of (``position``,
 ``obs_publisher_did``, ``namespace``, ``filename``).
 
-``search`` paginates by keyset, not by page number: pass the previous page's
+``search`` pages by keyset by default: pass the previous page's
 ``t.meta["next_after"]`` back in as ``after`` to get the next page (``None``
-once there are no more rows). Pass ``with_total_count=True`` to also get a
-filter-scoped row count in ``t.meta["total_count"]``.
+once there are no more rows). This works on every Argus deployment. Pass
+``with_total_count=True`` to also get a filter-scoped row count in
+``t.meta["total_count"]``.
 
 .. code-block:: python
 
     >>> page1 = DataDiscovery.search(filters, page_size=50, with_total_count=True)
     >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
 
-There's no way to jump straight to page *N* the way ``OFFSET`` would (confirmed
-live that this TAP service rejects ``OFFSET`` outright), so getting to a
-specific page means walking forward one page at a time until you reach it:
+To jump straight to page *N*, pass ``page`` (1-based). The query then uses
+``OFFSET (page - 1) * page_size``, and ``t.meta["next_page"]`` is the next page
+number (``None`` on the last page). With ``with_total_count=True`` you also get
+``t.meta["total_pages"]``. Both ways of paging return the same rows in the
+same order, custom order included; ``page`` and ``after`` can't be combined.
+
+.. code-block:: python
+
+    >>> page7 = DataDiscovery.search(filters, page_size=50, page=7, with_total_count=True)
+    >>> page7.meta["next_page"], page7.meta["total_pages"]
+
+``OFFSET`` needs a recent Argus release. The RAL dev deployment supports it;
+the production Argus and the CADC mirror still reject it, and asking them for
+``page`` > 1 raises ``OffsetNotSupported`` (``page=1`` adds no ``OFFSET``, so
+it runs anywhere). On those services, reach page *N* by walking forward with
+the keyset cursor:
 
 .. code-block:: python
 
@@ -750,9 +764,7 @@ UI-sized page at a time:
 
 By default, results are ordered by ``obs_publisher_did`` (the keyset
 pagination cursor). Order by any other ``ivoa.ObsCore`` column instead with
-``set_order(field, direction)`` — confirmed live against the SRCNet TAP
-service that a custom ``ORDER BY`` is *not* affected by the ``OFFSET``
-restriction above; it combines with keyset pagination too, via a
+``set_order(field, direction)``. It combines with both ways of paging, via a
 tie-breaking ``obs_publisher_did`` secondary sort so ordering stays
 deterministic even when *field* has duplicate values. Rows where *field* is
 NULL come last for ``ASC`` and first for ``DESC`` (the server's ordering), and
@@ -865,14 +877,19 @@ Execute an arbitrary ADQL statement against the CAOM2 TAP service.
 execute_adql, count_adql
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-Named alternatives to ``query`` for free-form ADQL, row-capped rather than
-paginated — the TAP service the SRCNet Data Discovery client targets rejects
-``OFFSET`` outright, so there is no page-number pagination for a free-form
-query the way there is for ``search`` above (keyset pagination via ``after``).
+Named alternatives to ``query`` for free-form ADQL. ``execute_adql`` caps the
+rows with ``max_rows``, or returns one page with ``page`` and ``page_size``: it
+appends ``OFFSET (page - 1) * page_size`` to the query and sets
+``t.meta["next_page"]``. Like ``search(page=...)``, this needs an Argus release
+with ``OFFSET`` (``OffsetNotSupported`` otherwise). Give the query an
+``ORDER BY``, or the pages may overlap or skip rows; a query with its own
+``OFFSET`` can't be paged this way.
 
 .. code-block:: python
 
     >>> t = DataDiscovery.execute_adql("SELECT TOP 20 * FROM ivoa.ObsCore", max_rows=20)
+    >>> p3 = DataDiscovery.execute_adql(
+    ...     "SELECT obs_id, target_name FROM ivoa.ObsCore ORDER BY obs_id", page=3, page_size=20)
 
 ``count_adql`` returns a row count for a free-form query by executing it and
 measuring the result, capped at ``max_rows`` — not an unbounded ``COUNT(*)``,

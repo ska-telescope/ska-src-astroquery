@@ -127,6 +127,18 @@ class UnsupportedOIDCFlow(CustomException):
         super().__init__(self.message)
 
 
+class OffsetNotSupported(CustomException):
+    """Raised when a page past the first is asked of a TAP service that rejects ``OFFSET``."""
+
+    def __init__(self, tap_url):
+        self.message = (
+            "The TAP service at {url} does not support OFFSET, so page > 1 can't be requested "
+            "directly. Page with the keyset cursor instead: pass the previous page's "
+            "meta['next_after'] as after=."
+        ).format(url=tap_url)
+        super().__init__(self.message)
+
+
 class DownloadFailed(CustomException):
     """Raised when no site holding a file could serve it; *failures* gives each site's reason."""
 

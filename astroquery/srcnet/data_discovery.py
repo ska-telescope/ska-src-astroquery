@@ -61,6 +61,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from ._helpdesk import srcnet_raise
+from .exceptions import OffsetNotSupported
 
 __all__ = ["DataDiscovery", "DataDiscoveryClass", "SearchFilters"]
 
@@ -819,10 +820,13 @@ class DataDiscoveryClass:
     # live against the real service (not assumed from MAN-827's own
     # description of the *current*, DaCHS-backed Gateway), shape all of this:
     #
-    #   1. OFFSET is rejected outright ("invalid ADQL keyword: LIMIT") --
-    #      MAN-827's own page/page_size contract (TOP + OFFSET, matching what
-    #      DaCHS accepts today) does not carry over to Argus. search() uses
-    #      keyset pagination on obs_publisher_did instead (see its docstring).
+    #   1. OFFSET is rejected outright ("invalid ADQL keyword: LIMIT") by the
+    #      production Argus and the CADC mirror. Newer Argus releases accept it
+    #      (the RAL dev deployment, checked live in Nov 2026), so search() and
+    #      execute_adql() offer MAN-827's page/page_size contract (TOP +
+    #      OFFSET) as an opt-in *page*, raising OffsetNotSupported where the
+    #      service still rejects it. Keyset pagination on obs_publisher_did
+    #      (*after*) stays the default and works everywhere.
     #   2. Sub-selects in FROM are rejected outright ("sub-select not
     #      supported in FROM clause") -- the current Gateway's own
     #      SELECT COUNT(*) FROM (...) trick for counting a free-form query
@@ -937,9 +941,14 @@ class DataDiscoveryClass:
         columns: str,
         after: Optional[str],
         top_n: Optional[int],
+        offset: int = 0,
     ) -> str:
         """The ADQL both :meth:`search` and :meth:`explain` build — one
         function, so they can never disagree with each other.
+
+        A non-zero *offset* (page-number pagination, see :meth:`search`'s
+        *page*) appends ``OFFSET offset`` after the ``ORDER BY``. Zero adds
+        nothing, so page 1 runs unchanged on services without ``OFFSET``.
 
         ``top_n=None`` means unbounded: no ``TOP`` clause at all (the caller
         relies on ``maxrec`` alone, same as :meth:`query`/:meth:`execute_adql`)
@@ -978,7 +987,24 @@ class DataDiscoveryClass:
             adql += " WHERE " + " AND ".join(where)
         if order_by:
             adql += f" ORDER BY {order_by}"
+        if offset:
+            adql += f" OFFSET {offset}"
         return adql
+
+    def _query_page(self, adql: str, maxrec: Optional[int], offset: int) -> Table:
+        """:meth:`query`, turning a service's rejection of ``OFFSET`` into
+        :class:`~astroquery.srcnet.exceptions.OffsetNotSupported`.
+
+        Argus releases without ``OFFSET`` reject it as ``invalid ADQL
+        keyword: LIMIT`` (checked live on the production Argus and the CADC
+        mirror). Only translated when *offset* is in the query, so any other
+        error passes through unchanged."""
+        try:
+            return self.query(adql, maxrec=maxrec)
+        except pyvo.dal.DALQueryError as exc:
+            if offset and re.search(r"\b(LIMIT|OFFSET)\b", str(exc)):
+                raise OffsetNotSupported(self._tap_url) from exc
+            raise
 
     def search(
         self,
@@ -987,6 +1013,7 @@ class DataDiscoveryClass:
         columns: Optional[Union[str, Sequence[str]]] = None,
         after: Optional[str] = None,
         page_size: Optional[int] = 100,
+        page: Optional[int] = None,
         split_obs_id: bool = True,
         with_total_count: bool = False,
         verbose: bool = False,
@@ -997,14 +1024,21 @@ class DataDiscoveryClass:
         instrument, target name, data-product type, a publisher-DID list, and
         Rucio namespace/filename, all ANDed, any subset set or none.
 
-        Pagination is keyset-based (*after* / ``obs_publisher_did``), **not**
-        the ``page``/``page_size`` OFFSET scheme MAN-827 proposes — confirmed
-        live against Argus that ``OFFSET`` is rejected outright
-        (``invalid ADQL keyword: LIMIT``), so page-N pagination the way the
-        current DaCHS-backed Gateway does it isn't possible against this
-        service today. Pass the previous call's ``table.meta["next_after"]``
-        back in as *after* to get the next page; it's ``None`` once there are
-        no more rows.
+        Two ways to page, both ordered the same way:
+
+        * **Keyset** (the default, works on every Argus): pass the previous
+          call's ``table.meta["next_after"]`` back in as *after* to get the
+          next page; it's ``None`` once there are no more rows.
+        * **Page number** (MAN-827's ``page``/``page_size`` contract): pass
+          *page* (1-based) to jump straight to that page with ``OFFSET``.
+          ``table.meta["next_page"]`` is the next page number, or ``None`` on
+          the last page. This needs an Argus release that accepts ``OFFSET``
+          (the RAL dev deployment does; the production Argus and the CADC
+          mirror still reject it as ``invalid ADQL keyword: LIMIT``, and then
+          :class:`~astroquery.srcnet.exceptions.OffsetNotSupported` is
+          raised). ``page=1`` adds no ``OFFSET``, so it runs anywhere.
+
+        *after* and *page* can't be combined.
 
         A position filter (*filters.coordinates* set) is paginated the same
         way. It can't be sorted "nearest first" or report
@@ -1049,6 +1083,9 @@ class DataDiscoveryClass:
             Keyset cursor — see above. Ignored when *page_size* is ``None``.
         page_size : int or None, optional
             Max rows this call returns. ``None`` = unbounded (see above).
+        page : int, optional
+            1-based page number, fetched with ``OFFSET (page - 1) * page_size``
+            — see above. Needs *page_size*; can't be combined with *after*.
         split_obs_id : bool, optional
             Also add ``namespace``/``filename`` columns, split from ``obs_id``
             on the first ``:`` — the same convention-dependent split the
@@ -1068,32 +1105,43 @@ class DataDiscoveryClass:
         `~astropy.table.Table`
             ``table.meta["next_after"]`` is the cursor for the next page, or
             ``None`` if this was the last one (always ``None`` when
-            *page_size* is ``None``). ``table.meta["total_count"]`` is
-            present only when *with_total_count* is true.
+            *page_size* is ``None``). With *page*, ``table.meta["page"]`` and
+            ``table.meta["next_page"]`` are set too. ``table.meta["total_count"]``
+            is present only when *with_total_count* is true, plus
+            ``table.meta["total_pages"]`` when *page* is given.
+
+        Raises
+        ------
+        ValueError
+            *page* is not a positive integer, is combined with *after*, or is
+            given with ``page_size=None``.
+        OffsetNotSupported
+            *page* > 1 and the TAP service rejects ``OFFSET``.
 
         Examples
         --------
         >>> filters = SearchFilters().add_filter("collection", "JCMT").add_filter("dataproduct_type", "image")
         >>> page1 = DataDiscovery.search(filters, page_size=50)
         >>> page2 = DataDiscovery.search(filters, page_size=50, after=page1.meta["next_after"])
+        >>> page7 = DataDiscovery.search(filters, page_size=50, page=7)  # needs OFFSET support
         >>> everything = DataDiscovery.search(filters, page_size=None)  # unbounded
         """
+        offset = _page_offset(page, page_size, after)
         unbounded = page_size is None
         selected = self._selected_columns(columns, filters)
         column_list = ", ".join(selected) if selected else (columns or self.DEFAULT_SEARCH_COLUMNS)
         columns = self._select_columns(column_list, filters, not unbounded)
         order = None if filters is None else filters.order
         # Fetch one extra row to learn whether another page exists, without a
-        # second round trip or an OFFSET this service doesn't support; trimmed
-        # back to page_size before returning. Unbounded mode has no "next
-        # page" to detect at all.
+        # second round trip; trimmed back to page_size before returning.
+        # Unbounded mode has no "next page" to detect at all.
         fetch_n = None if unbounded else page_size + 1
-        adql = self._search_adql(filters, columns, after, fetch_n)
+        adql = self._search_adql(filters, columns, after, fetch_n, offset)
 
         if verbose:
             print(f"[ADQL] {adql}")
 
-        table = self.query(adql, maxrec=fetch_n)
+        table = self._query_page(adql, fetch_n, offset)
 
         has_more = (not unbounded) and len(table) > page_size
         if has_more:
@@ -1110,6 +1158,10 @@ class DataDiscoveryClass:
         else:
             table.meta["next_after"] = None
 
+        if page is not None:
+            table.meta["page"] = page
+            table.meta["next_page"] = page + 1 if has_more else None
+
         if selected:
             # Fetched only for the cursor; the caller asked for exactly `selected`.
             table = table[[c for c in selected if c in table.colnames]]
@@ -1121,6 +1173,8 @@ class DataDiscoveryClass:
                 count_adql += " WHERE " + " AND ".join(count_where)
             count_table = self.query(count_adql, maxrec=1)
             table.meta["total_count"] = int(count_table["num_records"][0]) if len(count_table) else 0
+            if page is not None:
+                table.meta["total_pages"] = -(-table.meta["total_count"] // page_size)  # ceiling division
 
         return table
 
@@ -1194,6 +1248,7 @@ class DataDiscoveryClass:
         columns: Optional[Union[str, Sequence[str]]] = None,
         after: Optional[str] = None,
         page_size: Optional[int] = 100,
+        page: Optional[int] = None,
     ) -> str:
         """
         Return the ADQL :meth:`search` would run for *filters*, without
@@ -1220,6 +1275,8 @@ class DataDiscoveryClass:
         page_size : int or None, optional
             Same as :meth:`search` — shown here as the real ``TOP`` value
             (or no ``TOP`` at all when ``None``).
+        page : int, optional
+            Same as :meth:`search` — shown here as the real ``OFFSET``.
 
         Returns
         -------
@@ -1232,27 +1289,30 @@ class DataDiscoveryClass:
         """
         selected = self._selected_columns(columns, filters)
         column_list = ", ".join(selected) if selected else (columns or self.DEFAULT_SEARCH_COLUMNS)
+        offset = _page_offset(page, page_size, after)
         columns = self._select_columns(column_list, filters, page_size is not None)
-        return self._search_adql(filters, columns, after, page_size)
+        return self._search_adql(filters, columns, after, page_size, offset)
 
     def execute_adql(
         self,
         adql: str,
         *,
         max_rows: Optional[int] = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
         verbose: bool = False,
     ) -> Table:
         """
         Run free-form ADQL (MAN-827's Q5 / the ADQL tab), capped at
-        *max_rows*.
+        *max_rows*, or one page of it with *page*/*page_size*.
 
-        No ``page``/``page_size`` OFFSET parameter: confirmed live against
-        Argus that ``OFFSET`` is rejected outright (``invalid ADQL keyword:
-        LIMIT``), so page-N pagination over arbitrary free-form ADQL isn't
-        possible against this service today — and unlike :meth:`search`,
-        there's no ``obs_publisher_did``-style keyset fallback available
-        here either, because an arbitrary caller-supplied query has no
-        column astroquery can assume is present, sortable, or unique.
+        Paging appends ``OFFSET (page - 1) * page_size`` to *adql* and
+        fetches ``page_size`` rows (via ``maxrec``), so it needs an Argus
+        release that accepts ``OFFSET`` — see :meth:`search`. Give *adql* an
+        ``ORDER BY``: without one the service may return rows in a different
+        order on each call, and pages can overlap or skip rows. There's no
+        keyset alternative here, unlike :meth:`search`: an arbitrary query
+        has no column astroquery can assume is present, sortable, or unique.
 
         Parameters
         ----------
@@ -1263,21 +1323,62 @@ class DataDiscoveryClass:
         max_rows : int, optional
             Row cap, via TAP's own ``maxrec``. Defaults to
             :attr:`~astroquery.srcnet.Conf.SRCNET_DEFAULT_MAXREC` (same
-            default :meth:`query` uses).
+            default :meth:`query` uses). Can't be combined with *page*.
+        page : int, optional
+            1-based page number. Needs *page_size*; *adql* must not have its
+            own ``OFFSET``.
+        page_size : int, optional
+            Rows per page, used with *page*.
         verbose : bool, optional
-            Print *adql* before executing.
+            Print the ADQL actually executed.
 
         Returns
         -------
         `~astropy.table.Table`
+            With *page*, ``table.meta["page"]`` and ``table.meta["next_page"]``
+            (``None`` on the last page) are set.
+
+        Raises
+        ------
+        ValueError
+            Bad *page*/*page_size*, *page* with *max_rows*, or *page* with an
+            *adql* that already has an ``OFFSET``.
+        OffsetNotSupported
+            *page* > 1 and the TAP service rejects ``OFFSET``.
 
         Examples
         --------
         >>> DataDiscovery.execute_adql("SELECT TOP 10 * FROM ivoa.ObsCore", max_rows=10)
+        >>> DataDiscovery.execute_adql("SELECT * FROM ivoa.ObsCore ORDER BY obs_id", page=3, page_size=20)
         """
+        if page is None and page_size is not None:
+            raise ValueError("page_size is only used with page; use max_rows to cap an unpaged query.")
+        if page is None:
+            if verbose:
+                print(f"[ADQL] {adql}")
+            return self.query(adql, maxrec=max_rows)
+
+        if page_size is None:
+            raise ValueError("page needs page_size.")
+        if max_rows is not None:
+            raise ValueError("page and max_rows can't be combined; page_size sets the rows per page.")
+        if re.search(r"\bOFFSET\b", _adql_code_only(adql), re.IGNORECASE):
+            raise ValueError("adql already has an OFFSET; drop it or don't pass page.")
+        offset = _page_offset(page, page_size, None)
+        adql = adql.strip().rstrip(";").rstrip()
+        if offset:
+            # On its own line: a trailing "-- comment" would otherwise swallow it.
+            adql += f"\nOFFSET {offset}"
         if verbose:
             print(f"[ADQL] {adql}")
-        return self.query(adql, maxrec=max_rows)
+        # One extra row tells whether another page exists, as in search().
+        table = self._query_page(adql, page_size + 1, offset)
+        has_more = len(table) > page_size
+        if has_more:
+            table = table[:page_size]
+        table.meta["page"] = page
+        table.meta["next_page"] = page + 1 if has_more else None
+        return table
 
     def count_adql(
         self,
@@ -1768,6 +1869,33 @@ def _sql_literal(value) -> str:
 #: custom-ordered search() page needs -- U+001F (unit separator), chosen
 #: because it can't appear in a DID or a real column value typed at a keyboard.
 _CURSOR_SEP = "\x1f"
+
+
+#: ADQL string literals ('it''s'), delimited identifiers ("col") and "--" comments.
+_ADQL_NON_CODE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*")
+
+
+def _adql_code_only(adql: str) -> str:
+    """*adql* with string literals, delimited identifiers and comments blanked
+    out, so keyword checks only see the query's own clauses."""
+    return _ADQL_NON_CODE.sub(" ", adql)
+
+
+def _page_offset(page: Optional[int], page_size: Optional[int], after: Optional[str]) -> int:
+    """Rows to skip for 1-based *page* of *page_size* rows; 0 when *page* is
+    ``None`` or 1. Validates the combination search()/explain() accept."""
+    if page is None:
+        return 0
+    # bool is an int subclass; page=True is a mistake, not page 1.
+    if isinstance(page, bool) or not isinstance(page, (int, np.integer)) or page < 1:
+        raise ValueError(f"page must be a positive integer, got {page!r}.")
+    if after is not None:
+        raise ValueError("page and after can't be combined; use one way of paging.")
+    if page_size is None:
+        raise ValueError("page needs a page_size; page_size=None means an unbounded search.")
+    if isinstance(page_size, bool) or not isinstance(page_size, (int, np.integer)) or page_size < 1:
+        raise ValueError(f"page_size must be a positive integer, got {page_size!r}.")
+    return (int(page) - 1) * int(page_size)
 
 
 def _encode_cursor(order_value, did_value) -> str:

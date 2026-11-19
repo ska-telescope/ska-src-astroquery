@@ -9,6 +9,9 @@ srcnet
 
 - ``DataAccess.move_data`` and ``stage_data`` ask the SRCNet Data Management API to replicate data
   to another storage area or to stage it; ``get_job_status`` and ``wait_for_job`` follow the job.
+- ``DataDiscovery.search``, ``explain`` and ``execute_adql`` take ``page`` for page-number paging with
+  ``OFFSET`` on Argus releases that support it; ``OffsetNotSupported`` is raised where the service
+  still rejects ``OFFSET``. Keyset paging with ``after`` is unchanged.
 
 eso
 ^^^
