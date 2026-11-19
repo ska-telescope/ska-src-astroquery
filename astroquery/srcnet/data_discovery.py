@@ -1362,12 +1362,13 @@ class DataDiscoveryClass:
             raise ValueError("page needs page_size.")
         if max_rows is not None:
             raise ValueError("page and max_rows can't be combined; page_size sets the rows per page.")
-        if re.search(r"\bOFFSET\b", adql, re.IGNORECASE):
+        if re.search(r"\bOFFSET\b", _adql_code_only(adql), re.IGNORECASE):
             raise ValueError("adql already has an OFFSET; drop it or don't pass page.")
         offset = _page_offset(page, page_size, None)
         adql = adql.strip().rstrip(";").rstrip()
         if offset:
-            adql += f" OFFSET {offset}"
+            # On its own line: a trailing "-- comment" would otherwise swallow it.
+            adql += f"\nOFFSET {offset}"
         if verbose:
             print(f"[ADQL] {adql}")
         # One extra row tells whether another page exists, as in search().
@@ -1868,6 +1869,16 @@ def _sql_literal(value) -> str:
 #: custom-ordered search() page needs -- U+001F (unit separator), chosen
 #: because it can't appear in a DID or a real column value typed at a keyboard.
 _CURSOR_SEP = "\x1f"
+
+
+#: ADQL string literals ('it''s'), delimited identifiers ("col") and "--" comments.
+_ADQL_NON_CODE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*")
+
+
+def _adql_code_only(adql: str) -> str:
+    """*adql* with string literals, delimited identifiers and comments blanked
+    out, so keyword checks only see the query's own clauses."""
+    return _ADQL_NON_CODE.sub(" ", adql)
 
 
 def _page_offset(page: Optional[int], page_size: Optional[int], after: Optional[str]) -> int:

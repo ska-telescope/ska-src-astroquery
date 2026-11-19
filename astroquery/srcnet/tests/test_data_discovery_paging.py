@@ -197,7 +197,7 @@ class TestExecuteAdqlPage:
     def test_page_appends_offset_and_fetches_one_extra(self, dd):
         with patch.object(dd, "query", return_value=_rows(3)) as mock_query:
             dd.execute_adql(self.ADQL, page=3, page_size=20)
-        assert mock_query.call_args[0][0] == self.ADQL + " OFFSET 40"
+        assert mock_query.call_args[0][0] == self.ADQL + "\nOFFSET 40"
         assert mock_query.call_args[1]["maxrec"] == 21
 
     def test_page_one_has_no_offset(self, dd):
@@ -208,7 +208,7 @@ class TestExecuteAdqlPage:
     def test_trailing_semicolon_and_whitespace_stripped(self, dd):
         with patch.object(dd, "query", return_value=_rows(1)) as mock_query:
             dd.execute_adql(self.ADQL + " ;\n", page=2, page_size=5)
-        assert mock_query.call_args[0][0] == self.ADQL + " OFFSET 5"
+        assert mock_query.call_args[0][0] == self.ADQL + "\nOFFSET 5"
 
     def test_next_page_and_trim(self, dd):
         with patch.object(dd, "query", return_value=_rows(6)):
@@ -221,6 +221,25 @@ class TestExecuteAdqlPage:
         with patch.object(dd, "query", return_value=_rows(2)):
             result = dd.execute_adql(self.ADQL, page=2, page_size=5)
         assert result.meta["next_page"] is None
+
+    def test_offset_survives_a_trailing_comment(self, dd):
+        # A trailing "-- comment" must not swallow the OFFSET (page 2 would silently be page 1).
+        with patch.object(dd, "query", return_value=_rows(1)) as mock_query:
+            dd.execute_adql(self.ADQL + " -- sorted\n", page=2, page_size=5)
+        sent = mock_query.call_args[0][0]
+        assert sent.splitlines()[-1] == "OFFSET 5"
+        assert sent == self.ADQL + " -- sorted\nOFFSET 5"
+
+    @pytest.mark.parametrize("adql", [
+        "SELECT obs_id FROM ivoa.ObsCore WHERE target_name = 'offset field' ORDER BY obs_id",
+        "SELECT obs_id FROM ivoa.ObsCore WHERE target_name = 'it''s OFFSET 3' ORDER BY obs_id",
+        'SELECT "offset" FROM ivoa.ObsCore ORDER BY obs_id',
+        "SELECT obs_id FROM ivoa.ObsCore ORDER BY obs_id -- no OFFSET here",
+    ])
+    def test_offset_in_quotes_or_comments_is_not_a_clause(self, dd, adql):
+        with patch.object(dd, "query", return_value=_rows(1)) as mock_query:
+            dd.execute_adql(adql, page=2, page_size=5)
+        assert mock_query.call_args[0][0].endswith("\nOFFSET 5")
 
     def test_query_with_own_offset_rejected(self, dd):
         with pytest.raises(ValueError, match="already has an OFFSET"):
