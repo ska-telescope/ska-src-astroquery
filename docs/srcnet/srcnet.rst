@@ -415,6 +415,62 @@ A file's catalogue ``uri`` (``skao:...``) is not itself a Rucio DID, so the
 DID is taken from the DataLink response rather than from the catalogue.
 
 
+User Storage (CANFAR Cavern)
+----------------------------
+
+Sites running the CANFAR science platform keep their users' files in a Cavern
+service, an IVOA VOSpace 2.0 server. ``list_user_storage_services`` shows
+where each site's Cavern is, from Site Capabilities: a registered ``cavern``
+service (``registered`` true), and the Cavern CANFAR runs beside each science
+portal (``registered`` false), since most sites don't register one yet.
+
+.. code-block:: python
+
+    >>> from astroquery.srcnet import SRCNet
+    >>> SRCNet.login()
+    >>> SRCNet.list_user_storage_services()
+
+``get_user_storage`` returns a client for one site. Pass a node or site name
+as listed there; its addresses are tried in order and the first that answers
+as a VOSpace service is used. ``url=`` skips the lookup.
+
+.. code-block:: python
+
+    >>> us = SRCNet.get_user_storage("ESPSRC")
+    >>> us.home                      # 'home/<your username>', from the login token
+    >>> us.list()                    # your home folder: name, path, type, size, modified, ...
+    >>> us.list(us.home + "/results")
+    >>> us.info(us.home + "/results/cube.fits")
+    >>> us.exists(us.home + "/inbox")
+    >>> us.get(us.home + "/results/cube.fits", "cube.fits")
+
+Managing files:
+
+.. code-block:: python
+
+    >>> us.mkdir(us.home + "/inbox")                          # parents=True, exist_ok=True available
+    >>> us.put("local.fits", us.home + "/inbox/local.fits")    # overwrite=True to replace
+    >>> us.move(us.home + "/inbox/local.fits", us.home + "/results")         # into a folder
+    >>> us.move(us.home + "/results/local.fits", us.home + "/results/cube.fits")  # rename
+    >>> us.set_public(us.home + "/results/cube.fits")           # public=False to undo
+    >>> us.delete(us.home + "/inbox")                           # recursive=True for a non-empty folder
+
+Requests carry the SRCNet login's bearer token. Missing paths raise
+``FileNotFoundError``, refused access ``PermissionError``, and an existing
+destination ``FileExistsError`` (``put`` without ``overwrite``, ``mkdir``
+without ``exist_ok``, ``move`` onto a file). ``delete`` refuses your home folder
+itself, and a non-empty folder unless ``recursive=True``. ``get`` writes to a
+temporary ``.part`` file and renames it when the download completes. Uploads
+use VOSpace transfer negotiation (the login token goes only to endpoints that
+ask for it, never to pre-signed URLs); moves and recursive deletes run as
+server-side jobs, and ``timeout`` bounds the whole wait.
+
+Cavern can't store spaces, ``#``, ``%``, ``?`` or non-ASCII letters in names
+(checked live), so ``put``, ``mkdir`` and ``move`` refuse such new names with a
+``ValueError`` instead of letting the service fail. Characters such as ``+``,
+``( )``, ``,``, ``&``, ``:``, ``~`` and ``@`` work.
+
+
 Software Discovery
 ------------------
 
