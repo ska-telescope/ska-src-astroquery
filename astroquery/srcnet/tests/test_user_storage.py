@@ -511,3 +511,133 @@ class TestWrites:
         srcnet.session.request.return_value = _resp(500, "disk full")
         with pytest.raises(OSError, match="500 .*disk full"):
             rw.info("home/alice/a.txt")
+
+
+class TestReviewFixes:
+    """Greptile on !28: special characters, token forwarding, job deadlines, upload fallback, redaction."""
+
+    def test_uri_paths_are_decoded(self):
+        assert _node_path("vos://example.org~cavern/home/alice/my%20file%231.txt") == "home/alice/my file#1.txt"
+
+    def test_plain_paths_are_literal(self):
+        assert _node_path("home/alice/100%25.txt") == "home/alice/100%25.txt"
+
+    def test_encoded_slash_in_uri_refused(self):
+        with pytest.raises(ValueError):
+            _node_path("vos://example.org~cavern/home/alice/a%2Fb")
+
+    def test_listed_path_round_trips(self, us, srcnet, tmp_path):
+        listing = LISTING.replace("home/alice/cube.fits", "home/alice/my%20cube%231.fits")
+        srcnet.session.request.return_value = _resp(200, listing)
+        row = us.list("home/alice")[1]
+        assert row["name"] == "my cube#1.fits" and row["path"] == "home/alice/my cube#1.fits"
+        srcnet.session.request.return_value = _resp(200, chunks=[b"x"])
+        us.get(row["path"], str(tmp_path / "out.fits"))
+        assert srcnet.session.request.call_args.args[1] == BASE + "/files/home/alice/my%20cube%231.fits"
+
+    def test_vos_uri_encodes_segments(self, rw):
+        rw._vos_root_cache = "vos://example.org~cavern"
+        assert rw._vos_uri("home/alice/my file#1.txt") == "vos://example.org~cavern/home/alice/my%20file%231.txt"
+
+    def _upload(self, rw, srcnet, tmp_path, protocols):
+        local = tmp_path / "a.txt"
+        local.write_text("hello")
+        transfer = f'<vos:transfer xmlns:vos="http://www.ivoa.net/xml/VOSpace/v2.0">{protocols}</vos:transfer>'
+        srcnet.session.request.side_effect = FakeCavern({("GET", "/nodes/"): _resp(200, ROOT),
+                                                         ("POST", "/synctrans"): _resp(200, transfer)})
+        return str(local)
+
+    def test_preauthorised_endpoint_gets_no_token(self, rw, srcnet, tmp_path):
+        local = self._upload(rw, srcnet, tmp_path,
+                             '<vos:protocol uri="p"><vos:endpoint>https://s.org/preauth:xyz/a</vos:endpoint>'
+                             '</vos:protocol>')
+        srcnet.session.put.return_value = _resp(201)
+        rw.put(local, "home/alice/a.txt", overwrite=True)
+        assert srcnet.session.put.call_args.kwargs["headers"] == {"Authorization": None}
+
+    def test_token_endpoint_gets_token(self, rw, srcnet, tmp_path):
+        local = self._upload(rw, srcnet, tmp_path,
+                             '<vos:protocol uri="p"><vos:securityMethod uri="ivo://ivoa.net/sso#token"/>'
+                             '<vos:endpoint>https://s.org/files/a</vos:endpoint></vos:protocol>')
+        srcnet.session.put.return_value = _resp(201)
+        rw.put(local, "home/alice/a.txt", overwrite=True)
+        assert srcnet.session.put.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+    def test_non_https_endpoint_skipped(self, rw, srcnet, tmp_path):
+        local = self._upload(rw, srcnet, tmp_path,
+                             '<vos:protocol uri="p"><vos:endpoint>http://s.org/a</vos:endpoint></vos:protocol>')
+        with pytest.raises(OSError, match="not HTTPS"):
+            rw.put(local, "home/alice/a.txt", overwrite=True)
+        srcnet.session.put.assert_not_called()
+
+    def test_network_error_falls_back_to_next_endpoint(self, rw, srcnet, tmp_path):
+        import requests
+        local = self._upload(rw, srcnet, tmp_path,
+                             '<vos:protocol uri="p"><vos:endpoint>https://down.org/a</vos:endpoint>'
+                             '<vos:endpoint>https://up.org/a</vos:endpoint></vos:protocol>')
+        srcnet.session.put.side_effect = [requests.exceptions.ConnectionError("boom"), _resp(201)]
+        assert rw.put(local, "home/alice/a.txt", overwrite=True) == "home/alice/a.txt"
+        assert srcnet.session.put.call_args.args[0] == "https://up.org/a"
+
+    def test_upload_errors_name_hosts_not_urls(self, rw, srcnet, tmp_path):
+        local = self._upload(rw, srcnet, tmp_path,
+                             '<vos:protocol uri="p"><vos:endpoint>https://s.org/preauth:SECRET/a</vos:endpoint>'
+                             '</vos:protocol>')
+        srcnet.session.put.return_value = _resp(500, "token=abc123 failed")
+        with pytest.raises(OSError) as err:
+            rw.put(local, "home/alice/a.txt", overwrite=True)
+        assert "SECRET" not in str(err.value) and "abc123" not in str(err.value) and "s.org" in str(err.value)
+
+    def test_service_messages_redacted(self, rw, srcnet):
+        srcnet.session.request.return_value = _resp(500, "failed for Bearer eyJabc.def.ghi")
+        with pytest.raises(OSError) as err:
+            rw.info("home/alice/a.txt")
+        assert "eyJabc" not in str(err.value)
+
+    def test_job_deadline_checked_before_polling(self, rw, srcnet):
+        srcnet.session.request.side_effect = FakeCavern({("POST", "/j/phase"): _resp(200),
+                                                         ("GET", "/j"): _resp(200, _job("EXECUTING"))})
+        with patch("astroquery.srcnet.user_storage.time.monotonic", side_effect=[0, 0, 5]):
+            with pytest.raises(TimeoutError):
+                rw._run_job(BASE + "/j", timeout=1)
+        # started the job, but never polled once the time was up
+        assert [c[0] for c in srcnet.session.request.side_effect.calls] == ["POST"]
+
+    def test_job_requests_bounded_by_time_left(self, rw, srcnet):
+        fake = FakeCavern({("POST", "/j/phase"): _resp(200), ("GET", "/j"): _resp(200, _job("COMPLETED"))})
+        srcnet.session.request.side_effect = fake
+        with patch("astroquery.srcnet.user_storage.time.monotonic", side_effect=[0, 0, 7, 7]):
+            rw._run_job(BASE + "/j", timeout=10)
+        poll = [c for c in fake.calls if c[0] == "GET"][0][2]
+        assert poll["params"] == {"WAIT": 3} and poll["timeout"][1] <= 4
+
+    def test_request_timeout_becomes_timeout_error(self, rw, srcnet):
+        import requests
+        srcnet.session.request.side_effect = requests.exceptions.ReadTimeout("read timed out")
+        with pytest.raises(TimeoutError, match="not finished"):
+            rw._run_job(BASE + "/j", timeout=1)
+
+    @pytest.mark.parametrize("name", ["a b.txt", "a#b.txt", "a%b.txt", "a?b.txt", "café.txt", "tab\tname"])
+    def test_names_cavern_cannot_store_are_refused(self, rw, srcnet, tmp_path, name):
+        local = tmp_path / "a.txt"
+        local.write_text("x")
+        for call in (lambda: rw.put(str(local), f"home/alice/{name}"),
+                     lambda: rw.mkdir(f"home/alice/{name}"),
+                     lambda: rw.mkdir(f"home/alice/{name}/sub", parents=True)):
+            with pytest.raises(ValueError, match="can't store"):
+                call()
+        srcnet.session.request.assert_not_called()
+
+    def test_move_to_unsupported_name_refused(self, rw, srcnet):
+        srcnet.session.request.side_effect = FakeCavern({("GET", "/nodes/home/alice/a b.txt"): _resp(404)})
+        with pytest.raises(ValueError, match="can't store"):
+            rw.move("home/alice/a.txt", "home/alice/a b.txt")
+
+    @pytest.mark.parametrize("name", ["a+b.txt", "a(b).txt", "a,b.txt", "a&b.txt", "a:b.txt", "a~b.txt", "a@b.txt"])
+    def test_names_that_work_are_allowed(self, name):
+        from astroquery.srcnet.user_storage import _check_new_name
+        _check_new_name(f"home/alice/{name}")
+
+    def test_existing_odd_names_can_still_be_read(self, us, srcnet):
+        srcnet.session.request.return_value = _resp(200, EMPTY)
+        us.list("home/alice/old folder")  # no ValueError: only new names are checked

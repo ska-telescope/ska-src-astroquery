@@ -27,10 +27,13 @@ one, otherwise the site's ``canfar`` science-portal host with ``/cavern``.
 import base64
 import json
 import os
+import re
 import secrets
 import time
 import xml.etree.ElementTree as ET
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
+
+import requests
 
 from astropy.table import Table
 
@@ -74,17 +77,39 @@ def _node_path(path):
     """Normalise *path* to a relative VOSpace path (``home/<user>/…``).
 
     Accepts ``home/x``, ``/home/x`` or a full ``vos://<authority>/home/x`` URI.
-    Empty, ``.`` and ``..`` segments are refused rather than resolved.
+    A plain path is taken literally; a URI's path is percent-decoded segment by
+    segment, as the service encodes names in the URIs it returns. Empty, ``.``
+    and ``..`` segments are refused rather than resolved.
     """
     if path is None:
         raise ValueError("path is required, e.g. 'home/<user>'.")
     path = str(path)
-    if path.startswith("vos://"):
+    from_uri = path.startswith("vos://")
+    if from_uri:
         path = urlparse(path).path
-    parts = [p for p in path.strip("/").split("/")] if path.strip("/") else []
-    if any(p in ("", ".", "..") for p in parts):
+    parts = path.strip("/").split("/") if path.strip("/") else []
+    if from_uri:
+        parts = [unquote(p) for p in parts]
+    if any(p in ("", ".", "..") or "/" in p for p in parts):
         raise ValueError(f"path {path!r} has an empty, '.' or '..' segment.")
     return "/".join(parts)
+
+
+#: Characters Cavern can't store in a name, found live (Nov 2026): the service fails with a 500
+#: ("VOSURI syntax") or mangles the name for whitespace, '#', '%' and non-ASCII letters, and
+#: misreads '?' (a new file is reported as already existing).
+_UNSAFE_NAME = re.compile(r"[\s#%?]|[^\x00-\x7f]")
+
+
+def _check_new_name(path):
+    """Refuse a path for a new entry if its last segment has a character Cavern can't store."""
+    name = path.rsplit("/", 1)[-1]
+    bad = _UNSAFE_NAME.search(name)
+    if bad:
+        raise ValueError(
+            f"{name!r} contains {bad.group()!r}, which the user storage service can't store in a name "
+            "(spaces, '#', '%', '?' and non-ASCII letters aren't supported). Choose another name."
+        )
 
 
 def _url_path(path):
@@ -423,19 +448,30 @@ class UserStorageClass(_SrcnetTokenProxy):
             The destination path.
         """
         path = _node_path(path)
+        _check_new_name(path)
         if not os.path.isfile(local_file):
             raise FileNotFoundError(f"No such local file: {local_file}")
         if not overwrite and self.exists(path):
             raise FileExistsError(f"{path} already exists in the user storage; pass overwrite=True to replace it.")
         # VOSpace transfer negotiation: the service answers with the URL(s) to PUT the bytes to.
-        endpoints = self._negotiate(path, "pushToVoSpace")
         errors = []
-        for endpoint in endpoints:
-            with open(local_file, "rb") as f:
-                resp = self.session.put(endpoint, data=f, headers=self._headers(), timeout=TRANSFER_TIMEOUT_S)
+        for endpoint, needs_token in self._negotiate(path, "pushToVoSpace"):
+            host = urlparse(endpoint).netloc or "?"
+            if urlparse(endpoint).scheme != "https":
+                errors.append(f"{host}: not HTTPS, skipped")
+                continue
+            # A pre-authorised URL carries its own credential: send it no login token (None
+            # also removes the session's default Authorization header).
+            headers = self._headers() if needs_token else {"Authorization": None}
+            try:
+                with open(local_file, "rb") as f:
+                    resp = self.session.put(endpoint, data=f, headers=headers, timeout=TRANSFER_TIMEOUT_S)
+            except requests.exceptions.RequestException as exc:
+                errors.append(f"{host}: {type(exc).__name__}")
+                continue
             if resp.ok:
                 return path
-            errors.append(f"{resp.status_code} {resp.text[:120].strip()}")
+            errors.append(f"{host}: {resp.status_code} {redact_secrets(resp.text[:120].strip())}")
         raise OSError(f"Upload of {path} failed at every endpoint: {'; '.join(errors) or 'none offered'}")
 
     def mkdir(self, path, *, parents=False, exist_ok=False):
@@ -456,6 +492,8 @@ class UserStorageClass(_SrcnetTokenProxy):
             The folder's path.
         """
         path = _node_path(path)
+        for i in range(path.count("/") + 1):
+            _check_new_name("/".join(path.split("/")[:i + 1]))
         if parents:
             parts = path.split("/")
             for i in range(1, len(parts)):
@@ -496,7 +534,7 @@ class UserStorageClass(_SrcnetTokenProxy):
                 raise OSError(
                     f"{path} is a folder that isn't empty; pass recursive=True to delete it and its contents.")
             if resp.status_code == 400:
-                raise OSError(f"User storage refused to delete {path}: {resp.text[:300].strip()}")
+                raise OSError(f"User storage refused to delete {path}: {redact_secrets(resp.text[:300].strip())}")
         return path
 
     def move(self, path, destination, *, timeout=600):
@@ -519,6 +557,8 @@ class UserStorageClass(_SrcnetTokenProxy):
         else:
             if not into:
                 raise FileExistsError(f"{destination} already exists in the user storage.")
+        if not into:
+            _check_new_name(destination)
         job = self._request("POST", f"{self.url}/transfers",
                             data=self._transfer_xml(self._vos_uri(path), self._vos_uri(destination), keep_bytes=False),
                             headers={"Content-Type": "text/xml"}, allow_redirects=False, expected=(303,))
@@ -554,11 +594,11 @@ class UserStorageClass(_SrcnetTokenProxy):
         if resp.status_code in (401, 403):
             raise PermissionError(
                 f"User storage refused access ({resp.status_code}) to {redact_secrets(url)}: "
-                f"{resp.text[:200].strip()}"
+                f"{redact_secrets(resp.text[:200].strip())}"
             )
         if not resp.ok:
             raise OSError(f"User storage error {resp.status_code} for {method} {redact_secrets(url)}: "
-                          f"{resp.text[:300].strip()}")
+                          f"{redact_secrets(resp.text[:300].strip())}")
         return resp
 
     def _get_node(self, path):
@@ -580,7 +620,7 @@ class UserStorageClass(_SrcnetTokenProxy):
         return self._vos_root_cache
 
     def _vos_uri(self, path):
-        return f"{self._vos_root}/{path}"
+        return f"{self._vos_root}/{_url_path(path)}"
 
     def _node_xml(self, path, node_type, properties=None):
         """A VOSpace node document, for creating a node or changing its properties."""
@@ -608,7 +648,9 @@ class UserStorageClass(_SrcnetTokenProxy):
         return ET.tostring(transfer, encoding="UTF-8", xml_declaration=True)
 
     def _negotiate(self, path, direction):
-        """Endpoint URLs the service offers for moving *path*'s bytes in *direction*."""
+        """``(endpoint URL, needs_token)`` pairs the service offers for moving *path*'s bytes in
+        *direction*, in its order. ``needs_token`` is true for an endpoint offered under a
+        security method, false for a pre-authorised one."""
         protocol = _CORE + ("httpsput" if direction == "pushToVoSpace" else "httpsget")
         resp = self._request("POST", f"{self.url}/synctrans",
                              data=self._transfer_xml(self._vos_uri(path), direction, protocol=protocol),
@@ -621,22 +663,45 @@ class UserStorageClass(_SrcnetTokenProxy):
             doc = ET.fromstring(resp.content)
         except ET.ParseError as exc:
             raise OSError(f"User storage gave no transfer document for {path}.") from exc
-        endpoints = [e.text.strip() for e in doc.iter(f"{{{_VOS}}}endpoint") if e.text and e.text.strip()]
+        endpoints = [
+            (e.text.strip(), proto.find(f"{{{_VOS}}}securityMethod") is not None)
+            for proto in doc.iter(f"{{{_VOS}}}protocol")
+            for e in proto.findall(f"{{{_VOS}}}endpoint") if e.text and e.text.strip()
+        ]
         if not endpoints:
             raise OSError(f"User storage offered no endpoint to transfer {path}.")
         return endpoints
 
     def _run_job(self, job_url, timeout):
-        """Start a UWS job and wait until it finishes; raise with the service's message if it fails."""
-        self._request("POST", f"{job_url}/phase", data={"PHASE": "RUN"}, allow_redirects=False, expected=(200, 303))
+        """Start a UWS job and wait until it finishes; raise with the service's message if it fails.
+
+        *timeout* bounds the whole wait: each request gets at most the time left."""
         deadline = time.monotonic() + timeout
+
+        def remaining():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"User storage job not finished after {timeout} s: {redact_secrets(job_url)}")
+            return left
+
+        def bounded(method, url, **kwargs):
+            # A request cut short by the deadline is the job timing out, not a network fault.
+            left = remaining()
+            try:
+                return self._request(method, url, timeout=(min(15, left), min(USER_STORAGE_TIMEOUT_S[1], left + 1)),
+                                     **kwargs)
+            except requests.exceptions.Timeout:
+                raise TimeoutError(
+                    f"User storage job not finished after {timeout} s: {redact_secrets(job_url)}") from None
+
+        bounded("POST", f"{job_url}/phase", data={"PHASE": "RUN"}, allow_redirects=False, expected=(200, 303))
         while True:
-            doc = ET.fromstring(self._request("GET", job_url, params={"WAIT": 6}).content)
+            left = remaining()
+            resp = bounded("GET", job_url, params={"WAIT": max(1, min(6, int(left)))})
+            doc = ET.fromstring(resp.content)
             phase = (doc.findtext(f"{{{_UWS}}}phase") or "").upper()
             if phase == "COMPLETED":
                 return
             if phase in ("ERROR", "ABORTED"):
                 message = doc.findtext(f"{{{_UWS}}}errorSummary/{{{_UWS}}}message") or "no message"
-                raise OSError(f"User storage job {phase.lower()}: {message.strip()}")
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"User storage job still {phase or 'unknown'} after {timeout} s: {job_url}")
+                raise OSError(f"User storage job {phase.lower()}: {redact_secrets(message.strip())}")

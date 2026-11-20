@@ -461,8 +461,14 @@ destination ``FileExistsError`` (``put`` without ``overwrite``, ``mkdir``
 without ``exist_ok``, ``move`` onto a file). ``delete`` refuses your home folder
 itself, and a non-empty folder unless ``recursive=True``. ``get`` writes to a
 temporary ``.part`` file and renames it when the download completes. Uploads
-use VOSpace transfer negotiation; moves and recursive deletes run as
-server-side jobs that are waited for.
+use VOSpace transfer negotiation (the login token goes only to endpoints that
+ask for it, never to pre-signed URLs); moves and recursive deletes run as
+server-side jobs, and ``timeout`` bounds the whole wait.
+
+Cavern can't store spaces, ``#``, ``%``, ``?`` or non-ASCII letters in names
+(checked live), so ``put``, ``mkdir`` and ``move`` refuse such new names with a
+``ValueError`` instead of letting the service fail. Characters such as ``+``,
+``( )``, ``,``, ``&``, ``:``, ``~`` and ``@`` work.
 
 
 Software Discovery
