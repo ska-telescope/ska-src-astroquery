@@ -492,8 +492,13 @@ class UserStorageClass(_SrcnetTokenProxy):
             The folder's path.
         """
         path = _node_path(path)
-        for i in range(path.count("/") + 1):
-            _check_new_name("/".join(path.split("/")[:i + 1]))
+        # Only folders that will actually be created must have names Cavern can store: an
+        # existing folder (even one with such a name, made another way) is fine.
+        if exist_ok and self.exists(path):
+            if self.info(path)["type"] == "folder":
+                return path
+            raise FileExistsError(f"{path} already exists in the user storage.")
+        _check_new_name(path)
         if parents:
             parts = path.split("/")
             for i in range(1, len(parts)):

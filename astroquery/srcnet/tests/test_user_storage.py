@@ -622,11 +622,16 @@ class TestReviewFixes:
         local = tmp_path / "a.txt"
         local.write_text("x")
         for call in (lambda: rw.put(str(local), f"home/alice/{name}"),
-                     lambda: rw.mkdir(f"home/alice/{name}"),
-                     lambda: rw.mkdir(f"home/alice/{name}/sub", parents=True)):
+                     lambda: rw.mkdir(f"home/alice/{name}")):
             with pytest.raises(ValueError, match="can't store"):
                 call()
         srcnet.session.request.assert_not_called()
+        # a missing parent with such a name is refused when parents=True would create it
+        srcnet.session.request.side_effect = FakeCavern({
+            ("GET", "/nodes/home"): _resp(200, _node("home", "vos:ContainerNode")),
+            ("GET", "/nodes/home/alice"): _resp(200, _node("home/alice", "vos:ContainerNode"))})
+        with pytest.raises(ValueError, match="can't store"):
+            rw.mkdir(f"home/alice/{name}/sub", parents=True)
 
     def test_move_to_unsupported_name_refused(self, rw, srcnet):
         srcnet.session.request.side_effect = FakeCavern({("GET", "/nodes/home/alice/a b.txt"): _resp(404)})
@@ -641,3 +646,18 @@ class TestReviewFixes:
     def test_existing_odd_names_can_still_be_read(self, us, srcnet):
         srcnet.session.request.return_value = _resp(200, EMPTY)
         us.list("home/alice/old folder")  # no ValueError: only new names are checked
+
+    def test_mkdir_exist_ok_on_existing_odd_folder(self, rw, srcnet):
+        odd = _resp(200, _node("home/alice/old%20folder", "vos:ContainerNode"))
+        srcnet.session.request.side_effect = FakeCavern({("GET", "/nodes/home/alice/old%20folder"): odd})
+        assert rw.mkdir("home/alice/old folder", exist_ok=True) == "home/alice/old folder"
+
+    def test_mkdir_inside_existing_odd_folder(self, rw, srcnet):
+        odd = _resp(200, _node("home/alice/old%20folder", "vos:ContainerNode"))
+        fake = FakeCavern({("GET", "/nodes/"): _resp(200, ROOT),
+                           ("GET", "/nodes/home"): _resp(200, _node("home", "vos:ContainerNode")),
+                           ("GET", "/nodes/home/alice"): _resp(200, _node("home/alice", "vos:ContainerNode")),
+                           ("GET", "/nodes/home/alice/old%20folder"): odd,
+                           ("PUT", "/nodes/home/alice/old%20folder/new"): _resp(201)})
+        srcnet.session.request.side_effect = fake
+        assert rw.mkdir("home/alice/old folder/new", parents=True) == "home/alice/old folder/new"
