@@ -15,6 +15,7 @@ ENVIRONMENTS = {
         "datalink":        "https://datalink.ivoa.srcnet.skao.int/api/v1/links",  # the service ObsCore access_url uses
         "software_tap":    "https://software-discovery.srcnet.skao.int/tap/",
         "chat":            "https://chat.srcnet.skao.int",
+        "site_capabilities": "https://site-capabilities.srcnet.skao.int/api/v1",
     },
     "preprod": {
         # Dev authn host authn.srcdev.skao.int is decommissioned; the single SKA
@@ -26,6 +27,8 @@ ENVIRONMENTS = {
         "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
         "software_tap":    "https://software-discovery.ral-preprod.uksrc.org/tap/",
         "chat":            "https://chat.srcdev.skao.int",
+        # One Site Capabilities lists every site, pre-production ones included.
+        "site_capabilities": "https://site-capabilities.srcnet.skao.int/api/v1",
     },
     "dev": {
         # ska-src-api-deployment-stack local dev environment (minikube/kind).
@@ -36,6 +39,7 @@ ENVIRONMENTS = {
         "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
         "software_tap":    "https://sdapi.test/tap/",
         "chat":            "https://chat.srcdev.skao.int",
+        "site_capabilities": "https://site-capabilities.srcnet.skao.int/api/v1",
     },
     "local": {
         # Services run locally for development, including authentication: authn_api
@@ -51,6 +55,7 @@ ENVIRONMENTS = {
         "datalink":        "https://datalink.ivoa.srcdev.skao.int/rucio/links",
         "software_tap":    "http://localhost:8080/tap/",
         "chat":            "https://chat.srcdev.skao.int",
+        "site_capabilities": "https://site-capabilities.srcnet.skao.int/api/v1",
     },
 }
 
@@ -115,6 +120,7 @@ from .format_factory import SKAFormatFactory, Cube, Image, Spectra, Visibility
 from .software_discovery import SoftwareDiscovery, SoftwareDiscoveryClass
 from .data_discovery import DataDiscovery, DataDiscoveryClass, SearchFilters
 from .data_access import DataAccessClass
+from .user_storage import UserStorageClass
 from .chat import SRCNetChat
 
 #: Module-level DataAccess singleton — wraps the default SRCNet instance.
@@ -128,5 +134,6 @@ __all__ = [
     'SoftwareDiscovery', 'SoftwareDiscoveryClass',
     'DataDiscovery', 'DataDiscoveryClass', 'SearchFilters',
     'DataAccess', 'DataAccessClass',
+    'UserStorageClass',
     'SRCNetChat',
 ]

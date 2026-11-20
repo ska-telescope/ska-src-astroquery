@@ -12,6 +12,10 @@ srcnet
 - ``DataDiscovery.search``, ``explain`` and ``execute_adql`` take ``page`` for page-number paging with
   ``OFFSET`` on Argus releases that support it; ``OffsetNotSupported`` is raised where the service
   still rejects ``OFFSET``. Keyset paging with ``after`` is unchanged.
+- ``SRCNet.list_user_storage_services`` and ``get_user_storage`` find each site's CANFAR user storage
+  (Cavern, VOSpace 2.0) through Site Capabilities; ``UserStorageClass`` lists folders, reads metadata,
+  downloads and uploads files, creates, moves, renames and deletes files and folders, and makes them
+  public or private, with the SRCNet login.
 
 eso
 ^^^

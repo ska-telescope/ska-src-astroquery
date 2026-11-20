@@ -256,6 +256,7 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         self.srcnet_dm_api_base_address    = urls["dm_api"]
         self.srcnet_data_access_tap_url    = urls["data_access_tap"]
         self.srcnet_datalink_service_url   = urls["datalink"]
+        self.srcnet_site_capabilities_url  = urls["site_capabilities"]
 
         self.session = requests.Session()
 
@@ -348,6 +349,52 @@ class SRCNetClass(BaseVOQuery, BaseQuery):
         ...                circle=(351.9867, 8.7787, 0.1))
         """
         return self._data_access
+
+    def list_user_storage_services(self):
+        """Sites' user storage (CANFAR Cavern) services, from Site Capabilities.
+
+        A site that registers a ``cavern`` service is listed with it
+        (``registered`` true); every site with a CANFAR science portal is also
+        listed with the Cavern CANFAR runs beside it (``registered`` false),
+        since most sites don't register one. :meth:`login` first.
+
+        Returns
+        -------
+        `~astropy.table.Table`
+            Columns ``node``, ``site``, ``url``, ``registered``.
+        """
+        from .user_storage import list_user_storage_services
+        return list_user_storage_services(self)
+
+    def get_user_storage(self, site=None, *, url=None, token_service=None):
+        """Return a :class:`~astroquery.srcnet.UserStorageClass` for one site's user storage.
+
+        Parameters
+        ----------
+        site : str, optional
+            Node or site name as in Site Capabilities, e.g. ``"ESPSRC"`` or
+            ``"UKSRC-RAL"``. Its addresses are tried in order and the first that
+            answers as a VOSpace service is used.
+        url : str, optional
+            The Cavern base URL, e.g. ``"https://canfar.example.org/cavern"``,
+            instead of looking *site* up.
+        token_service : str, optional
+            Exchange the login token for this service's audience before each
+            call; by default the token is sent as it is.
+
+        Examples
+        --------
+        >>> SRCNet.login()
+        >>> us = SRCNet.get_user_storage("ESPSRC")
+        >>> us.list()                     # your home folder
+        >>> us.get(us.home + "/results/cube.fits")
+        """
+        from .user_storage import UserStorageClass, _SiteCapabilities
+        if (site is None) == (url is None):
+            raise ValueError("Give either site= or url=.")
+        if url is None:
+            url = _SiteCapabilities(self).find(site)
+        return UserStorageClass(self, url, token_service=token_service)
 
     def get_metadata(self, namespace, name, plugin="POSTGRES_JSON"):
         """Convenience proxy — delegates to :meth:`~DataAccessClass.get_metadata`."""
